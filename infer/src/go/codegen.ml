@@ -230,7 +230,7 @@ and gen_primaryexpr : primaryexpr -> string = function
     "((" ^ (* type *) ^ "*) " ^ (* name *) ^ ".start)[i] = ((" ^ (* type *) ^ "*) " ^ (* name *) ^ ".start)[i];" ^
     "}\n"
     "((" ^ (* type *) ^ "*) " ^ (* name *) ^ ".start)[" ^ (* name *) ^ ".length] = " ^ (* thing to append *) ^ "\n" *)
-  | Cast (_, t, e, _) -> "(" ^ gen_tp t ^ ") " ^ gen_expr e
+  | Cast (_, t, e, _) -> "(" ^ gen_tp t ^ ") (" ^ gen_expr e ^ ")"
 
 and gen_operand : operand -> string = function
   | Parens (_, e, _) -> "(" ^ gen_expr e ^ ")"
