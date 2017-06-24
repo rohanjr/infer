@@ -35,7 +35,6 @@ val array_out_of_bounds_l2 : t
 val array_out_of_bounds_l3 : t
 val buffer_overrun : t
 val checkers_access_global : t
-val checkers_dead_code : t
 val checkers_immutable_cast : t
 val checkers_print_c_call : t
 val checkers_print_objc_method_calls : t
@@ -73,6 +72,7 @@ val eradicate_return_not_nullable : t
 val eradicate_return_over_annotated : t
 val eradicate_return_value_not_present : t
 val eradicate_value_not_present : t
+val field_should_be_nullable : t
 val field_not_null_checked : t
 val inherently_dangerous_function : t
 val memory_leak : t
@@ -99,14 +99,28 @@ val tainted_value_reaching_sensitive_function : t
 val thread_safety_violation : t
 val unary_minus_applied_to_unsigned_expression : t
 val uninitialized_value : t
+val unreachable_code_after : t
 val unsafe_guarded_by_access : t
 val use_after_free : t
+
+module Tags : sig
+  type t
+
+  (** convert error description's tags to atd-serializable format *)
+  val tag_value_records_of_tags: t -> Jsonbug_t.tag_value_record list
+
+  (* convert atd-serializable format to error description's tags *)
+  val tags_of_tag_value_records: Jsonbug_t.tag_value_record list -> t
+
+  (* collect all lines from tags *)
+  val lines_of_tags: t -> int list
+end
 
 (** description field of error messages *)
 type error_desc = {
   descriptions : string list;
   advice : string option;
-  tags : (string * string) list;
+  tags : Tags.t;
   dotty : string option;
 } [@@deriving compare]
 
@@ -230,6 +244,8 @@ val desc_condition_is_assignment : Location.t -> error_desc
 
 val desc_condition_always_true_false : IntLit.t -> string option -> Location.t -> error_desc
 
+val desc_unreachable_code_after : Location.t -> error_desc
+
 val desc_deallocate_stack_variable : string -> Typ.Procname.t -> Location.t -> error_desc
 
 val desc_deallocate_static_memory : string -> Typ.Procname.t -> Location.t -> error_desc
@@ -296,8 +312,7 @@ val desc_inherently_dangerous_function : Typ.Procname.t -> error_desc
 val desc_unary_minus_applied_to_unsigned_expression :
   string option -> string -> Location.t -> error_desc
 
-val desc_unsafe_guarded_by_access :
-  Typ.Procname.t -> Fieldname.t -> string -> Location.t -> error_desc
+val desc_unsafe_guarded_by_access : Fieldname.t -> string -> Location.t -> error_desc
 
 val desc_tainted_value_reaching_sensitive_function :
   PredSymb.taint_kind -> string -> Typ.Procname.t -> Typ.Procname.t -> Location.t -> error_desc

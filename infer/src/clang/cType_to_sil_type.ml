@@ -9,6 +9,8 @@
 
 open! IStd
 
+module L = Logging
+
 let get_builtin_objc_typename builtin_type =
   match builtin_type with
   | `ObjCId -> Typ.Name.C.from_string CFrontend_config.objc_object
@@ -33,7 +35,7 @@ let type_desc_of_builtin_type_kind builtin_type_kind =
   | `WChar_S
   | `Char16
   | `Char32 -> Typ.Tint IChar
-  | `UShort
+  | `UShort -> Typ.Tint IUShort
   | `Short -> Typ.Tint IShort
   | `UInt
   | `UInt128 -> Typ.Tint IUInt
@@ -59,10 +61,12 @@ let pointer_attribute_of_objc_attribute attr_info =
   | `OCL_Weak -> Typ.Pk_objc_weak
   | `OCL_Autoreleasing -> Typ.Pk_objc_autoreleasing
 
-let rec build_array_type translate_decl tenv (qual_type : Clang_ast_t.qual_type) n_opt =
+let rec build_array_type translate_decl tenv (qual_type : Clang_ast_t.qual_type)
+    length_opt stride_opt =
   let array_type = qual_type_to_sil_type translate_decl tenv qual_type in
-  let len = Option.map ~f:(fun n -> IntLit.of_int64 (Int64.of_int n)) n_opt in
-  Typ.Tarray (array_type, len)
+  let length = Option.map ~f:IntLit.of_int length_opt in
+  let stride = Option.map ~f:IntLit.of_int stride_opt in
+  Typ.Tarray (array_type, length, stride)
 
 and type_desc_of_attr_type translate_decl tenv type_info attr_info =
   match type_info.Clang_ast_t.ti_desugared_type with
@@ -92,12 +96,13 @@ and type_desc_of_c_type translate_decl tenv c_type : Typ.desc =
   | BlockPointerType (_, qual_type) ->
       let typ = qual_type_to_sil_type translate_decl tenv qual_type in
       Typ.Tptr (typ, Typ.Pk_pointer)
-  | IncompleteArrayType (_, qual_type)
-  | DependentSizedArrayType (_, qual_type)
-  | VariableArrayType (_, qual_type) ->
-      build_array_type translate_decl tenv qual_type None
-  | ConstantArrayType (_, qual_type, n) ->
-      build_array_type translate_decl tenv qual_type (Some n)
+  | IncompleteArrayType (_, {arti_element_type; arti_stride})
+  | DependentSizedArrayType (_, {arti_element_type; arti_stride}) ->
+      build_array_type translate_decl tenv arti_element_type None arti_stride
+  | VariableArrayType (_, {arti_element_type; arti_stride}, _) ->
+      build_array_type translate_decl tenv arti_element_type None arti_stride
+  | ConstantArrayType (_, {arti_element_type; arti_stride}, n) ->
+      build_array_type translate_decl tenv arti_element_type (Some n) arti_stride
   | FunctionProtoType _
   | FunctionNoProtoType _ ->
       Typ.Tfun false
@@ -142,11 +147,11 @@ and decl_ptr_to_type_desc translate_decl tenv decl_ptr : Typ.desc =
   | Some (ObjCCategoryImplDecl _ as d)
   | Some (EnumDecl _ as d) -> translate_decl tenv d
   | Some _ ->
-      Logging.err_debug "Warning: Wrong decl found for  pointer %s "
+      L.(debug Capture Verbose) "Warning: Wrong decl found for  pointer %s "
         (Clang_ast_j.string_of_pointer decl_ptr);
       Typ.Tvoid
   | None ->
-      Logging.err_debug "Warning: Decl pointer %s not found."
+      L.(debug Capture Verbose) "Warning: Decl pointer %s not found."
         (Clang_ast_j.string_of_pointer decl_ptr);
       Typ.Tvoid
 

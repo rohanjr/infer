@@ -32,10 +32,10 @@ BUILD_SYSTEMS_TESTS += \
 
 DIRECT_TESTS += \
   c_bufferoverrun c_errors c_frontend \
-  cpp_bufferoverrun cpp_errors cpp_frontend cpp_quandary cpp_siof \
+  cpp_bufferoverrun cpp_errors cpp_frontend cpp_quandary cpp_siof cpp_threadsafety \
 
 ifneq ($(BUCK),no)
-BUILD_SYSTEMS_TESTS += buck-clang-db
+BUILD_SYSTEMS_TESTS += buck-clang-db buck_flavors buck_flavors_deterministic
 endif
 ifneq ($(CMAKE),no)
 BUILD_SYSTEMS_TESTS += clang_compilation_db cmake inferconfig
@@ -49,7 +49,9 @@ endif
 ifneq ($(XCODE_SELECT),no)
 BUILD_SYSTEMS_TESTS += xcodebuild_no_xcpretty
 DIRECT_TESTS += \
-  objc_frontend objc_errors objc_linters objc_ioslints objcpp_frontend objcpp_linters objc_linters-for-test-only
+  objc_frontend objc_errors objc_linters objc_ioslints \
+	objcpp_frontend objcpp_linters objc_linters-for-test-only \
+	objc_linters-def-folder
 ifneq ($(XCPRETTY),no)
 BUILD_SYSTEMS_TESTS += xcodebuild
 endif
@@ -58,6 +60,7 @@ endif # BUILD_C_ANALYZERS
 
 ifeq ($(BUILD_JAVA_ANALYZERS),yes)
 BUILD_SYSTEMS_TESTS += \
+	differential_interesting_paths_filter \
   differential_resolve_infer_eradicate_conflict \
   differential_skip_anonymous_class_renamings \
   differential_skip_duplicated_types_on_filenames \
@@ -136,14 +139,28 @@ ifeq ($(BUILD_C_ANALYZERS),yes)
 byte src_build test_build: clang_plugin
 endif
 
-.PHONY: infer
-infer: src_build
+$(INFER_COMMAND_MANUALS): src_build Makefile
+	$(QUIET)$(MKDIR_P) $(@D)
+	$(QUIET)$(INFER_BIN) $(patsubst infer-%.1,%,$(@F)) --help --help-format=groff > $@
+
+$(INFER_MANUAL): src_build Makefile
+	$(QUIET)$(MKDIR_P) $(@D)
+	$(QUIET)$(INFER_BIN) --help --help-format=groff > $@
+
+$(INFER_MANUALS_GZIPPED): %.gz: %
+	$(QUIET)$(REMOVE) $@
+	gzip $<
+
+infer_models: src_build
 ifeq ($(BUILD_JAVA_ANALYZERS),yes)
 	$(QUIET)$(call silent_on_success,Building Java annotations,\
 	$(MAKE) -C $(ANNOTATIONS_DIR))
 endif
 	$(QUIET)$(call silent_on_success,Building Infer models,\
 	$(MAKE) -C $(MODELS_DIR) all)
+
+.PHONY: infer
+infer: src_build $(INFER_MANUALS) infer_models
 
 .PHONY: clang_setup
 clang_setup:
@@ -350,15 +367,20 @@ test-replace: $(BUILD_SYSTEMS_TESTS:%=build_%_replace) $(DIRECT_TESTS:%=direct_%
 uninstall:
 	$(REMOVE_DIR) $(DESTDIR)$(libdir)/infer/
 	$(REMOVE) $(DESTDIR)$(bindir)/infer
+	$(REMOVE) $(INFER_COMMANDS:%=$(DESTDIR)$(bindir)/%)
+	$(REMOVE) $(foreach manual,$(INFER_MANUALS_GZIPPED),\
+	  $(DESTDIR)$(mandir)/man1/$(notdir $(manual)))
 
 .PHONY: test_clean
 test_clean: $(DIRECT_TESTS:%=direct_%_clean) $(BUILD_SYSTEMS_TESTS:%=build_%_clean)
 
 .PHONY: install
-install: infer
+install: infer $(INFER_MANUALS_GZIPPED)
 # create directory structure
 	test -d      $(DESTDIR)$(bindir) || \
 	  $(MKDIR_P) $(DESTDIR)$(bindir)
+	test -d      $(DESTDIR)$(mandir)/man1 || \
+	  $(MKDIR_P) $(DESTDIR)$(mandir)/man1
 	test -d      $(DESTDIR)$(libdir)/infer/ || \
 	  $(MKDIR_P) $(DESTDIR)$(libdir)/infer/
 ifeq ($(BUILD_C_ANALYZERS),yes)
@@ -380,10 +402,6 @@ endif
 ifeq ($(BUILD_JAVA_ANALYZERS),yes)
 	test -d      $(DESTDIR)$(libdir)/infer/infer/lib/java/ || \
 	  $(MKDIR_P) $(DESTDIR)$(libdir)/infer/infer/lib/java/
-endif
-ifneq ($(XCODE_SELECT),no)
-	test -d      $(DESTDIR)$(libdir)/infer/infer/lib/xcode_wrappers/ || \
-	  $(MKDIR_P) $(DESTDIR)$(libdir)/infer/infer/lib/xcode_wrappers/
 endif
 	test -d      $(DESTDIR)$(libdir)/infer/infer/annotations/ || \
 	  $(MKDIR_P) $(DESTDIR)$(libdir)/infer/infer/annotations/
@@ -410,12 +428,12 @@ ifeq ($(BUILD_C_ANALYZERS),yes)
 	$(QUIET)for i in $$(find infer/lib/clang_wrappers/*); do \
 	  $(INSTALL_PROGRAM) -C $$i $(DESTDIR)$(libdir)/infer/$$i; \
 	done
-#	  only for files that point to InferClang
+#	  only for files that point to infer
 	(cd $(DESTDIR)$(libdir)/infer/infer/lib/wrappers/ && \
 	 $(foreach cc,$(shell find $(LIB_DIR)/wrappers -type l), \
-	  [ $(cc) -ef $(INFERCLANG_BIN) ] && \
+	  [ $(cc) -ef $(INFER_BIN) ] && \
 	  $(REMOVE) $(notdir $(cc)) && \
-	  $(LN_S) ../../bin/InferClang $(notdir $(cc));))
+	  $(LN_S) ../../bin/infer $(notdir $(cc));))
 	$(QUIET)for i in $$(find infer/lib/specs/*); do \
 	  $(INSTALL_DATA) -C $$i $(DESTDIR)$(libdir)/infer/$$i; \
 	done
@@ -424,14 +442,6 @@ ifeq ($(BUILD_C_ANALYZERS),yes)
 	done
 	$(INSTALL_DATA) -C          infer/lib/linter_rules/linters.al \
 	  $(DESTDIR)$(libdir)/infer/infer/lib/linter_rules/linters.al
-	$(INSTALL_PROGRAM) -C $(INFERCLANG_BIN) $(DESTDIR)$(libdir)/infer/infer/bin/
-	(cd $(DESTDIR)$(libdir)/infer/infer/bin/ && \
-	 $(LN_S) -f InferClang InferClang++)
-endif
-ifneq ($(XCODE_SELECT),no)
-	$(QUIET)for i in $$(find infer/lib/xcode_wrappers/*); do \
-	  $(INSTALL_PROGRAM) -C $$i $(DESTDIR)$(libdir)/infer/$$i; \
-	done
 endif
 ifeq ($(BUILD_JAVA_ANALYZERS),yes)
 	$(INSTALL_DATA) -C          infer/annotations/annotations.jar \
@@ -452,14 +462,23 @@ endif
 	$(INSTALL_PROGRAM) -C       infer/lib/python/report.py \
 	  $(DESTDIR)$(libdir)/infer/infer/lib/python/report.py
 	$(INSTALL_PROGRAM) -C $(INFER_BIN) $(DESTDIR)$(libdir)/infer/infer/bin/
-	$(INSTALL_PROGRAM) -C $(INFERANALYZE_BIN) $(DESTDIR)$(libdir)/infer/infer/bin/
-	$(INSTALL_PROGRAM) -C $(INFERPRINT_BIN) $(DESTDIR)$(libdir)/infer/infer/bin/
 	(cd $(DESTDIR)$(bindir)/ && \
 	 $(REMOVE) infer && \
 	 $(LN_S) $(libdir_relative_to_bindir)/infer/infer/bin/infer infer)
+	for alias in $(INFER_COMMANDS); do \
+	  (cd $(DESTDIR)$(bindir)/ && \
+	   $(REMOVE) $$alias && \
+	   $(LN_S) infer $$alias); done
+	for alias in $(INFER_COMMANDS); do \
+	  (cd $(DESTDIR)$(libdir)/infer/infer/bin && \
+	   $(REMOVE) $$alias && \
+	   $(LN_S) infer $$alias); done
 	(cd $(DESTDIR)$(bindir)/ && \
 	 $(REMOVE) inferTraceBugs && \
 	 $(LN_S) $(libdir_relative_to_bindir)/infer/infer/lib/python/inferTraceBugs inferTraceBugs)
+	$(QUIET)for i in $(MAN_DIR)/man1/*; do \
+	  $(INSTALL_DATA) -C $$i $(DESTDIR)$(mandir)/man1/$$(basename $$i); \
+	done
 
 ifeq ($(IS_FACEBOOK_TREE),yes)
 	$(QUIET)$(MAKE) -C facebook install
@@ -481,7 +500,7 @@ ifeq ($(IS_FACEBOOK_TREE),yes)
 endif
 	$(QUIET)$(MAKE) -C $(DEPENDENCIES_DIR)/ocamldot clean
 	find $(INFER_DIR)/tests \( -name '*.o' -o -name '*.o.sh' \) -delete
-	$(REMOVE_DIR) _build_logs
+	$(QUIET)$(REMOVE_DIR) _build_logs $(MAN_DIR)
 
 .PHONY: conf-clean
 conf-clean: clean
@@ -499,6 +518,27 @@ conf-clean: clean
 	$(REMOVE_DIR) $(MODELS_DIR)/cpp/out/
 	$(REMOVE_DIR) $(MODELS_DIR)/java/infer-out/
 	$(REMOVE_DIR) $(MODELS_DIR)/objc/out/
+
+
+# opam package to hold infer dependencies
+INFER_PKG_OPAMLOCK=infer-lock-deps
+
+# phony because it depends on opam's internal state
+.PHONY: opam.lock
+opam.lock: opam
+	$(QUIET)if test x"$$(git status --porcelain -- opam)" != "x"; then \
+	  echo "ERROR: Changes to 'opam' detected." 1>&2; \
+	  echo "ERROR: Please commit or revert your changes before updating opam.lock." 1>&2; \
+	  echo "ERROR: This is because opam.lock is generated from the HEAD commit." 1>&2; \
+	  exit 1; \
+	fi
+	$(QUIET)$(call silent_on_success,opam update,$(OPAM) update)
+	$(QUIET)$(call silent_on_success,installing dependencies $(INFER_PKG_OPAMLOCK) opam package,\
+	  OPAMSWITCH=$(OPAMSWITCH); \
+	  $(OPAM) pin add --yes --no-action -k git $(INFER_PKG_OPAMLOCK) .#HEAD; \
+	  $(OPAM) install --deps-only --yes $(INFER_PKG_OPAMLOCK))
+	$(QUIET)$(call silent_on_success,generating opam.lock,\
+	  $(OPAM) lock --pkg  $(INFER_PKG_OPAMLOCK) > opam.lock)
 
 # print any variable for Makefile debugging
 print-%:

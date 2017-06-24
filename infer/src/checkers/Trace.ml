@@ -76,6 +76,8 @@ module type S = sig
 
   val update_sinks : t -> Sinks.t -> t
 
+  val get_footprint_indexes : t -> IntSet.t
+
   (** append the trace for given call site to the current caller trace *)
   val append : t -> t -> CallSite.t -> t
 
@@ -189,9 +191,7 @@ module Make (Spec : Spec) = struct
           else acc in
         Sinks.fold report_one sinks acc0 in
       let report_sources source acc =
-        if Source.is_footprint source
-        then acc
-        else report_source source t.sinks acc in
+        report_source source t.sinks acc in
       Sources.fold report_sources t.sources []
 
   let pp_path cur_pname fmt (cur_passthroughs, sources_passthroughs, sinks_passthroughs) =
@@ -345,6 +345,21 @@ module Make (Spec : Spec) = struct
 
   let update_sinks t sinks = { t with sinks }
 
+  let get_footprint_index source =
+    match Source.get_footprint_access_path source with
+    | Some access_path ->
+        AccessPath.get_footprint_index access_path
+    | None ->
+        None
+
+  let get_footprint_indexes trace =
+    Sources.fold
+      (fun source acc -> match get_footprint_index source with
+         | Some footprint_index -> IntSet.add footprint_index acc
+         | None -> acc)
+      (sources trace)
+      IntSet.empty
+
   (** compute caller_trace + callee_trace *)
   let append caller_trace callee_trace callee_site =
     if is_empty callee_trace
@@ -375,12 +390,16 @@ module Make (Spec : Spec) = struct
           |> Sinks.union caller_trace.sinks in
 
       let passthroughs =
-        if phys_equal sources caller_trace.sources && phys_equal sinks caller_trace.sinks
+        if Config.passthroughs
         then
-          (* this callee didn't add any new sources or any news sinks; it's just a passthrough *)
-          Passthroughs.add (Passthrough.make callee_site) caller_trace.passthroughs
+          if phys_equal sources caller_trace.sources && phys_equal sinks caller_trace.sinks
+          then
+            (* this callee didn't add any new sources or any news sinks; it's just a passthrough *)
+            Passthroughs.add (Passthrough.make callee_site) caller_trace.passthroughs
+          else
+            caller_trace.passthroughs
         else
-          caller_trace.passthroughs in
+          Passthroughs.empty in
 
       { sources; sinks; passthroughs; }
 

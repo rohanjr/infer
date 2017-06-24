@@ -24,7 +24,11 @@ let equal: t => t => bool;
 let d: t => unit;
 
 
-/** Dummy location */
+/** Dummy source location for the given file */
+let none: SourceFile.t => t;
+
+
+/** Dummy location with no source file */
 let dummy: t;
 
 
@@ -34,3 +38,7 @@ let pp: Format.formatter => t => unit;
 
 /** String representation of a location. */
 let to_string: t => string;
+
+
+/** Pretty print a file-position of a location */
+let pp_file_pos: Format.formatter => t => unit;

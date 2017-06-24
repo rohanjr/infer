@@ -15,14 +15,14 @@ AC_PREREQ([2.63])
 # - opam
 # - docker/Dockerfile
 AC_INIT([Infer],
-        [0.11.0],
+        [0.12.0],
         [https://github.com/facebook/infer/issues/])
 
 AC_CONFIG_SRCDIR([infer/src/IR/Sil.re])
 
 # WARNING: keep in sync with above
 INFER_MAJOR=0
-INFER_MINOR=11
+INFER_MINOR=12
 INFER_PATCH=0
 
 AC_SUBST([INFER_MAJOR])
@@ -128,6 +128,9 @@ AC_PROG_MKDIR_P
 if test "x$enable_c_analyzers" = "xyes"; then
   AC_PROG_CPP
   AC_PROG_CXX(clang++ g++)
+  # AC_PROG_CXX doesn't set CXX to "no" in case of failure (I have no words...); from the manual:
+  # "If none of those checks succeed, then as a last resort set CXX to g++. "
+  AS_IF([command -v "$CXX" > /dev/null], [], [AC_MSG_ERROR([no C++ compiler found])])
 
   dnl clang wants either clang version >= 3.1 or gcc version >= 4.7.2 to
   dnl compile itself
@@ -193,6 +196,14 @@ AC_ASSERT_PROG([rebuild], [$REBUILD])
 AC_ARG_VAR([CAML_LD_LIBRARY_PATH],
   [Additional directories to search for dynamically-loaded libraries.])
 
+
+AC_CHECK_TOOL([OPAM], [opam], [no])
+AS_IF([test "$OPAM" != "no"], [
+  AC_MSG_CHECKING([current opam switch])
+  OPAMSWITCH=$("$OPAM" switch show)
+  AC_MSG_RESULT([$OPAMSWITCH])
+])
+
 if test "x$enable_java_analyzers" = "xyes"; then
   AC_CHECK_TOOL([JAVA], [java], [no])
   AC_PATH_TOOL([JAVAC], [javac], [no])
@@ -226,8 +237,11 @@ _ACEOF
   fi
   AC_MSG_RESULT([$USER_JAVA_HOME])
   AC_SUBST([USER_JAVA_HOME])
-fi
 
+  AC_CHECK_LIB([z], [inflateEnd], [ZLIB_FOUND=yes], [ZLIB_FOUND=no])
+  AS_IF([test x"$ZLIB_FOUND" = xno], [AC_MSG_ERROR([zlib not found.])])
+fi
+# end if($enable_java_analyzers)
 
 AC_PATH_TOOL([ATDGEN], [atdgen], [no])
 AC_ASSERT_PROG([atdgen], [$ATDGEN])
@@ -243,8 +257,8 @@ AC_SUBST([ENABLE_OCAML_BINANNOT])
 # We use Buck to run the Infer tests
 AC_MSG_CHECKING([which version of Buck to use])
 buckversion_file=.buckversion
-oss_buck_version=763cbab643f2d5773fc1a1676301d7de86aef265
-fb_buck_version=7c0f2f731244fdb23d58b69520efd0cbad3e8f3a
+oss_buck_version=c8c96ad4f2664c9636865e162513c530823f6d5b
+fb_buck_version=a5e9b874a2ee0607cefa87367577583e187a83a4
 AS_IF([test x"$is_facebook_tree" = x"yes"],
   [buck_version=$fb_buck_version],
   [buck_version=$oss_buck_version])

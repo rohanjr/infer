@@ -14,6 +14,7 @@ module L = Logging
 
 module SourceKind = struct
   type t =
+    | Clipboard (** data read from the clipboard service *)
     | Intent (** external Intent or a value read from one *)
     | Other (** for testing or uncategorized sources *)
     | PrivateData (** private user or device-specific data *)
@@ -24,6 +25,7 @@ module SourceKind = struct
   let unknown = Unknown
 
   let of_string = function
+    | "Clipboard" -> Clipboard
     | "Intent" -> Intent
     | "PrivateData" -> PrivateData
     | "UserControlledURI" -> UserControlledURI
@@ -34,31 +36,36 @@ module SourceKind = struct
       ~f:(fun { QuandaryConfig.Source.procedure; kind; } -> Str.regexp procedure, kind)
       (QuandaryConfig.Source.of_json Config.quandary_sources)
 
-  let get pname tenv = match pname with
+  let get pname tenv =
+    let return = None in
+    match pname with
     | Typ.Procname.Java pname ->
         begin
           match Typ.Procname.java_get_class_name pname, Typ.Procname.java_get_method pname with
           | "android.location.Location",
             ("getAltitude" | "getBearing" | "getLatitude" | "getLongitude" | "getSpeed") ->
-              Some PrivateData
+              Some (PrivateData, return)
           | "android.telephony.TelephonyManager",
             ("getDeviceId" |
              "getLine1Number" |
              "getSimSerialNumber" |
              "getSubscriberId" |
              "getVoiceMailNumber") ->
-              Some PrivateData
+              Some (PrivateData, return)
           | "com.facebook.infer.builtins.InferTaint", "inferSecretSource" ->
-              Some Other
+              Some (Other, return)
           | class_name, method_name ->
               let taint_matching_supertype typename _ =
                 match Typ.Name.name typename, method_name with
                 | "android.app.Activity", "getIntent" ->
-                    Some Intent
+                    Some (Intent, return)
                 | "android.content.Intent", "getStringExtra" ->
-                    Some Intent
+                    Some (Intent, return)
                 | "android.content.SharedPreferences", "getString" ->
-                    Some PrivateData
+                    Some (PrivateData, return)
+                | ("android.content.ClipboardManager" | "android.text.ClipboardManager"),
+                  ("getPrimaryClip" | "getText") ->
+                    Some (Clipboard, return)
                 | _ ->
                     None in
               let kind_opt =
@@ -75,7 +82,7 @@ module SourceKind = struct
                     List.find_map
                       ~f:(fun (procedure_regex, kind) ->
                           if Str.string_match procedure_regex procedure 0
-                          then Some (of_string kind)
+                          then Some (of_string kind, return)
                           else None)
                       external_sources
               end
@@ -169,6 +176,7 @@ module SourceKind = struct
   let pp fmt kind =
     F.fprintf fmt
       (match kind with
+       | Clipboard -> "Clipboard"
        | Intent -> "Intent"
        | UserControlledURI -> "UserControlledURI"
        | PrivateData -> "PrivateData"
@@ -205,41 +213,42 @@ module SinkKind = struct
   let get pname actuals tenv =
     (* taint all the inputs of [pname]. for non-static procedures, taints the "this" parameter only
        if [taint_this] is true. *)
-    let taint_all ?(taint_this=false) kind ~report_reachable =
+    let taint_all ?(taint_this=false) kind =
       let actuals_to_taint, offset =
         if Typ.Procname.java_is_static pname || taint_this
         then actuals, 0
         else List.tl_exn actuals, 1 in
-      List.mapi
-        ~f:(fun param_num _ -> kind, param_num + offset, report_reachable)
-        actuals_to_taint in
+      let indexes =
+        IntSet.of_list (List.mapi ~f:(fun param_num _ -> param_num + offset) actuals_to_taint) in
+      Some (kind, indexes) in
+
     (* taint the nth non-"this" parameter (0-indexed) *)
-    let taint_nth n kind ~report_reachable =
+    let taint_nth n kind =
       let first_index = if Typ.Procname.java_is_static pname then n else n + 1 in
-      [kind, first_index, report_reachable] in
+      Some (kind, IntSet.singleton first_index) in
     match pname with
     | Typ.Procname.Java java_pname ->
         begin
           match Typ.Procname.java_get_class_name java_pname,
                 Typ.Procname.java_get_method java_pname with
           | "android.util.Log", ("e" | "println" | "w" | "wtf") ->
-              taint_all Logging ~report_reachable:true
+              taint_all Logging
           | "java.io.File", "<init>"
           | "java.nio.file.FileSystem", "getPath"
           | "java.nio.file.Paths", "get" ->
-              taint_all CreateFile ~report_reachable:true
+              taint_all CreateFile
           | "com.facebook.infer.builtins.InferTaint", "inferSensitiveSink" ->
-              [Other, 0, false]
+              taint_nth 0 Other
           | class_name, method_name ->
               let taint_matching_supertype typename _ =
                 match Typ.Name.name typename, method_name with
                 | "android.app.Activity",
                   ("startActivityFromChild" | "startActivityFromFragment") ->
-                    Some (taint_nth 1 StartComponent ~report_reachable:true)
+                    taint_nth 1 StartComponent
                 | "android.app.Activity", "startIntentSenderForResult"  ->
-                    Some (taint_nth 2 StartComponent ~report_reachable:true)
+                    taint_nth 2 StartComponent
                 | "android.app.Activity", "startIntentSenderFromChild"  ->
-                    Some (taint_nth 3 StartComponent ~report_reachable:true)
+                    taint_nth 3 StartComponent
                 | "android.content.Context",
                   ("bindService" |
                    "sendBroadcast" |
@@ -257,9 +266,9 @@ module SinkKind = struct
                    "startNextMatchingActivity" |
                    "startService" |
                    "stopService") ->
-                    Some (taint_nth 0 StartComponent ~report_reachable:true)
+                    taint_nth 0 StartComponent
                 | "android.content.Context", "startIntentSender" ->
-                    Some (taint_nth 1 StartComponent ~report_reachable:true)
+                    taint_nth 1 StartComponent
                 | "android.content.Intent",
                   ("parseUri" |
                    "getIntent" |
@@ -270,9 +279,9 @@ module SinkKind = struct
                    "setDataAndType" |
                    "setDataAndTypeAndNormalize" |
                    "setPackage") ->
-                    Some (taint_nth 0 CreateIntent ~report_reachable:true)
+                    taint_nth 0 CreateIntent
                 | "android.content.Intent", "setClassName" ->
-                    Some (taint_all CreateIntent ~report_reachable:true)
+                    taint_all CreateIntent
                 | "android.webkit.WebView",
                   ("evaluateJavascript" |
                    "loadData" |
@@ -280,7 +289,7 @@ module SinkKind = struct
                    "loadUrl" |
                    "postUrl" |
                    "postWebMessage") ->
-                    Some (taint_all JavaScript ~report_reachable:true)
+                    taint_all JavaScript
                 | class_name, method_name ->
                     (* check the list of externally specified sinks *)
                     let procedure = class_name ^ "." ^ method_name in
@@ -291,25 +300,19 @@ module SinkKind = struct
                             let kind = of_string kind in
                             try
                               let n = int_of_string index in
-                              Some (taint_nth n kind ~report_reachable:true)
+                              taint_nth n kind
                             with Failure _ ->
                               (* couldn't parse the index, just taint everything *)
-                              Some (taint_all kind ~report_reachable:true)
+                              taint_all kind
                           else
                             None)
                       external_sinks in
-              begin
-                match
-                  PatternMatch.supertype_find_map_opt
-                    tenv
-                    taint_matching_supertype
-                    (Typ.Name.Java.from_string class_name) with
-                | Some sinks -> sinks
-                | None -> []
-              end
-
+              PatternMatch.supertype_find_map_opt
+                tenv
+                taint_matching_supertype
+                (Typ.Name.Java.from_string class_name)
         end
-    | pname when BuiltinDecl.is_declared pname -> []
+    | pname when BuiltinDecl.is_declared pname -> None
     | pname -> failwithf "Non-Java procname %a in Java analysis@." Typ.Procname.pp pname
 
   let pp fmt kind =
@@ -331,19 +334,24 @@ include
     module Sink = JavaSink
 
     let should_report source sink =
-      match Source.kind source, Sink.kind sink with
-      | PrivateData, Logging (* logging private data issue *)
-      | Intent, StartComponent (* intent reuse issue *)
-      | Intent, CreateIntent (* intent configured with external values issue *)
-      | Intent, JavaScript (* external data flows into JS: remote code execution risk *)
-      | PrivateData, JavaScript (* leaking private data into JS *)
-      | UserControlledURI, (CreateIntent | StartComponent)
-      (* create intent/launch component from user-controlled URI *)
-      | UserControlledURI, CreateFile ->
-          (* create file from user-controller URI; potential path-traversal vulnerability *)
-          true
-      | Other, _ | _, Other -> (* for testing purposes, Other matches everything *)
-          true
-      | _ ->
-          false
+      if Source.is_footprint source
+      then false
+      else
+        match Source.kind source, Sink.kind sink with
+        | PrivateData, Logging (* logging private data issue *)
+        | Intent, StartComponent (* intent reuse issue *)
+        | Intent, CreateIntent (* intent configured with external values issue *)
+        | Intent, JavaScript (* external data flows into JS: remote code execution risk *)
+        | PrivateData, JavaScript (* leaking private data into JS *)
+        | UserControlledURI, (CreateIntent | StartComponent)
+        (* create intent/launch component from user-controlled URI *)
+        | UserControlledURI, CreateFile
+        (* create file from user-controller URI; potential path-traversal vulnerability *)
+        | Clipboard, (StartComponent | CreateIntent | JavaScript | CreateFile) ->
+            (* do something sensitive with user-controlled data from the clipboard *)
+            true
+        | Other, _ | _, Other -> (* for testing purposes, Other matches everything *)
+            true
+        | _ ->
+            false
   end)

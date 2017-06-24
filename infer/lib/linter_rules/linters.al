@@ -18,7 +18,7 @@ DEFINE-CHECKER DIRECT_ATOMIC_PROPERTY_ACCESS = {
 		HOLDS-IN-NODE ObjCIvarRefExpr;
 
   	SET message = "Direct access to ivar %ivar_name% of an atomic property";
-  	SET suggestion = "Accessing an ivar of an atomic property makes the property nonatomic";
+  	SET suggestion = "Accessing an ivar of an atomic property makes the property nonatomic.";
 	  SET severity = "WARNING";
 };
 
@@ -137,11 +137,11 @@ DEFINE-CHECKER REGISTERED_OBSERVER_BEING_DEALLOCATED = {
 
 DEFINE-CHECKER STRONG_DELEGATE_WARNING = {
 
-  LET name_contains_delegate = property_named(REGEXP("[dD]elegate"));
+  LET name_contains_delegate = declaration_has_name(REGEXP("[dD]elegate"));
   LET name_does_not_contain_delegates =
-					NOT property_named(REGEXP("[dD]elegates"));
+					NOT declaration_has_name(REGEXP("[dD]elegates"));
   LET name_does_not_contains_queue =
-					NOT property_named(REGEXP("[qQ]ueue"));
+					NOT declaration_has_name(REGEXP("[qQ]ueue"));
 
   SET report_when =
 	    WHEN
@@ -149,7 +149,7 @@ DEFINE-CHECKER STRONG_DELEGATE_WARNING = {
 			HOLDS-IN-NODE ObjCPropertyDecl;
 
   SET message = "Property or ivar %decl_name% declared strong";
-  SET suggestion = "In general delegates should be declared weak or assign";
+  SET suggestion = "In general delegates should be declared weak or assign.";
 
 };
 
@@ -159,7 +159,7 @@ DEFINE-CHECKER GLOBAL_VARIABLE_INITIALIZED_WITH_FUNCTION_OR_METHOD_CALL = {
      is_objc_extension() AND is_global_var() AND (NOT is_const_var());
 
 	LET makes_an_expensive_call =
-	 (is_node("CallExpr") AND NOT call_function_named("CGPointMake"))
+	 (is_node("CallExpr") AND NOT call_function("CGPointMake"))
 		OR is_node("CXXTemporaryObjectExpr")
     OR is_node("CXXMemberCallExpr")
     OR is_node("CXXOperatorCallExpr")
@@ -222,3 +222,12 @@ DEFINE-CHECKER CXX_REFERENCE_CAPTURED_IN_OBJC_BLOCK = {
 		  SET suggestion = "This could cause a crash.";
 			SET severity = "ERROR";
 		};
+
+
+DEFINE-CHECKER POINTER_TO_INTEGRAL_IMPLICIT_CAST = {
+  SET report_when =
+      WHEN has_cast_kind("PointerToIntegral")
+      HOLDS-IN-NODE ImplicitCastExpr;
+  SET message = "Implicit conversion from %child_type% to %type% in usage of %name%";
+	SET doc_url = "https://clang.llvm.org/docs/DiagnosticsReference.html#wint-conversion";
+};

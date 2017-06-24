@@ -65,10 +65,6 @@ type ptr_kind =
 
 let equal_ptr_kind: ptr_kind => ptr_kind => bool;
 
-
-/** statically determined length of an array type, if any */
-type static_length = option IntLit.t [@@deriving compare];
-
 type type_quals [@@deriving compare];
 
 let mk_type_quals:
@@ -87,8 +83,6 @@ let is_volatile: type_quals => bool;
 
 
 /** types for sil (structured) expressions */
-
-/** types for sil (structured) expressions */
 type t = {desc, quals: type_quals} [@@deriving compare]
 and desc =
   | Tint ikind /** integer type */
@@ -97,7 +91,8 @@ and desc =
   | Tfun bool /** function type with noreturn attribute */
   | Tptr t ptr_kind /** pointer type */
   | Tstruct name /** structured value type name */
-  | Tarray t static_length /** array type with statically fixed length */
+  | TVar string /** type variable (ie. C++ template variables) */
+  | Tarray t (option IntLit.t) (option IntLit.t) /** array type with statically fixed stride and length */
 [@@deriving compare]
 and name =
   | CStruct QualifiedCppName.t
@@ -142,6 +137,7 @@ module Name: {
 
   /** qualified name of the type, may return nonsense for Java classes */
   let qual_name: t => QualifiedCppName.t;
+  let unqualified_name: t => QualifiedCppName.t;
   module C: {
     let from_string: string => t;
     let from_qual_name: QualifiedCppName.t => t;
@@ -419,6 +415,9 @@ module Procname: {
 
   /** Check if the proc name comes from a lambda expression */
   let java_is_lambda: t => bool;
+
+  /** Check if the proc name comes from generated code */
+  let java_is_generated: t => bool;
 
   /** Check if the last parameter is a hidden inner class, and remove it if present.
       This is used in private constructors, where a proxy constructor is generated

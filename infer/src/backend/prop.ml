@@ -472,7 +472,7 @@ let rec create_strexp_of_type tenv struct_init_mode (typ : Typ.t) len inst : Sil
     else
       create_fresh_var () in
   match typ.desc, len with
-  | (Tint _ | Tfloat _ | Tvoid | Tfun _ | Tptr _), None ->
+  | (Tint _ | Tfloat _ | Tvoid | Tfun _ | Tptr _ | TVar _), None ->
       Eexp (init_value (), inst)
   | Tstruct name, _ -> (
       match struct_init_mode, Tenv.lookup tenv name with
@@ -489,14 +489,14 @@ let rec create_strexp_of_type tenv struct_init_mode (typ : Typ.t) len inst : Sil
       | _ ->
           Estruct ([], inst)
     )
-  | Tarray (_, len_opt), None ->
+  | Tarray (_, len_opt, _), None ->
       let len = match len_opt with
         | None -> Exp.get_undefined false
         | Some len -> Exp.Const (Cint len) in
       Earray (len, [], inst)
   | Tarray _, Some len ->
       Earray (len, [], inst)
-  | (Tint _ | Tfloat _ | Tvoid | Tfun _ | Tptr _), Some _ ->
+  | (Tint _ | Tfloat _ | Tvoid | Tfun _ | Tptr _ | TVar _), Some _ ->
       assert false
 
 let replace_array_contents (hpred : Sil.hpred) esel : Sil.hpred = match hpred with
@@ -548,7 +548,7 @@ let exp_collapse_consecutive_indices_prop (typ : Typ.t) exp =
         false in
   let typ_is_one_step_from_base =
     match typ.desc with
-    | Tptr (t, _) | Tarray (t, _) ->
+    | Tptr (t, _) | Tarray (t, _, _) ->
         typ_is_base t
     | _ ->
         false in
@@ -712,10 +712,10 @@ module Normalize = struct
           Closure { c with captured_vars; }
       | Const _ ->
           e
-      | Sizeof {typ={desc=Tarray ({desc=Tint ik}, _)}; dynamic_length=Some l}
+      | Sizeof {typ={desc=Tarray ({desc=Tint ik}, _, _)}; dynamic_length=Some l}
         when Typ.ikind_is_char ik && Config.curr_language_is Config.Clang ->
           eval l
-      | Sizeof {typ={desc=Tarray ({desc=Tint ik}, Some l)}}
+      | Sizeof {typ={desc=Tarray ({desc=Tint ik}, Some l, _)}}
         when Typ.ikind_is_char ik && Config.curr_language_is Config.Clang ->
           Const (Cint l)
       | Sizeof _ ->
@@ -991,12 +991,12 @@ module Normalize = struct
                 Exp.int (IntLit.div n m)
             | Const (Cfloat v), Const (Cfloat w) ->
                 Exp.float (v /.w)
-            | Sizeof {typ={desc=Tarray (elt, _)}; dynamic_length=Some len},
+            | Sizeof {typ={desc=Tarray (elt, _, _)}; dynamic_length=Some len},
               Sizeof {typ=elt2; dynamic_length=None}
               (* pattern: sizeof(elt[len]) / sizeof(elt) = len *)
               when Typ.equal elt elt2 ->
                 len
-            | Sizeof {typ={desc=Tarray (elt, Some len)}; dynamic_length=None},
+            | Sizeof {typ={desc=Tarray (elt, Some len, _)}; dynamic_length=None},
               Sizeof {typ=elt2; dynamic_length=None}
               (* pattern: sizeof(elt[len]) / sizeof(elt) = len *)
               when Typ.equal elt elt2 ->
@@ -1356,7 +1356,7 @@ module Normalize = struct
       | Var _ ->
           Estruct ([], inst)
       | te ->
-          L.err "trying to create ptsto with type: %a@\n@." (Sil.pp_texp_full Pp.text) te;
+          L.internal_error "trying to create ptsto with type: %a@." (Sil.pp_texp_full Pp.text) te;
           assert false in
     let strexp : Sil.strexp = match expo with
       | Some e -> Eexp (e, inst)
@@ -1381,27 +1381,27 @@ module Normalize = struct
               let hpred' = mk_ptsto_exp tenv Fld_init (root, size, None) inst in
               replace_hpred hpred'
           | Earray (BinOp (Mult, Sizeof {typ=t; dynamic_length=None; subtype=st1}, x), esel, inst),
-            Sizeof {typ={desc=Tarray (elt, _)} as arr} when Typ.equal t elt ->
+            Sizeof {typ={desc=Tarray (elt, _, _)} as arr} when Typ.equal t elt ->
               let dynamic_length = Some x in
               let sizeof_data = {Exp.typ=arr; nbytes=None; dynamic_length; subtype=st1} in
               let hpred' =
                 mk_ptsto_exp tenv Fld_init (root, Sizeof sizeof_data, None) inst in
               replace_hpred (replace_array_contents hpred' esel)
           | Earray (BinOp (Mult, x, Sizeof {typ; dynamic_length=None; subtype}), esel, inst),
-            Sizeof {typ={desc=Tarray (elt, _)} as arr} when Typ.equal typ elt ->
+            Sizeof {typ={desc=Tarray (elt, _, _)} as arr} when Typ.equal typ elt ->
               let sizeof_data = {Exp.typ=arr; nbytes=None; dynamic_length=Some x; subtype} in
               let hpred' =
                 mk_ptsto_exp tenv Fld_init (root, Sizeof sizeof_data, None) inst in
               replace_hpred (replace_array_contents hpred' esel)
           | Earray (BinOp (Mult, Sizeof {typ; dynamic_length=Some len; subtype}, x), esel, inst),
-            Sizeof {typ={desc=Tarray (elt, _)} as arr} when Typ.equal typ elt ->
+            Sizeof {typ={desc=Tarray (elt, _, _)} as arr} when Typ.equal typ elt ->
               let sizeof_data = {Exp.typ=arr; nbytes=None;
                                  dynamic_length=Some (Exp.BinOp(Mult, x, len)); subtype} in
               let hpred' =
                 mk_ptsto_exp tenv Fld_init (root, Sizeof sizeof_data, None) inst in
               replace_hpred (replace_array_contents hpred' esel)
           | Earray (BinOp (Mult, x, Sizeof {typ; dynamic_length=Some len; subtype}), esel, inst),
-            Sizeof {typ={desc=Tarray (elt, _)} as arr} when Typ.equal typ elt ->
+            Sizeof {typ={desc=Tarray (elt, _, _)} as arr} when Typ.equal typ elt ->
               let sizeof_data = {Exp.typ=arr; nbytes=None;
                                  dynamic_length=Some (Exp.BinOp(Mult, x, len)); subtype} in
               let hpred' =
@@ -1853,7 +1853,7 @@ let prop_dfs_sort tenv p =
   let sigma_fp = p.sigma_fp in
   let sigma_fp' = sigma_dfs_sort tenv sigma_fp in
   let p' = set p ~sigma:sigma' ~sigma_fp:sigma_fp' in
-  (* L.err "@[<2>P SORTED:@\n%a@\n@." pp_prop p'; *)
+  (* L.out "@[<2>P SORTED:@\n%a@\n@." pp_prop p'; *)
   p'
 
 let prop_fav_add_dfs tenv fav prop =
@@ -2149,10 +2149,10 @@ let exist_quantify tenv fav (prop : normal t) : normal t =
       if Sil.equal_subst sub prop.sub then prop
       else unsafe_cast_to_normal (set prop ~sub) in
     (*
-    L.out "@[<2>.... Existential Quantification ....\n";
-    L.out "SUB:%a\n" pp_sub prop'.sub;
-    L.out "PI:%a\n" pp_pi prop'.pi;
-    L.out "PROP:%a\n@." pp_prop prop';
+    L.out "@[<2>.... Existential Quantification ....@\n";
+    L.out "SUB:%a@\n" pp_sub prop'.sub;
+    L.out "PI:%a@\n" pp_pi prop'.pi;
+    L.out "PROP:%a@\n@." pp_prop prop';
     *)
     prop_ren_sub tenv ren_sub prop'
 
@@ -2361,10 +2361,10 @@ let prop_iter_make_id_primed tenv id iter =
         begin
           match eq with
           | Aeq (Var id1, e1) when Sil.ident_in_exp id1 e1 ->
-              L.out "@[<2>#### ERROR: an assumption of the analyzer broken ####@\n";
-              L.out "Broken Assumption: id notin e for all (id,e) in sub@\n";
-              L.out "(id,e) : (%a,%a)@\n" (Ident.pp Pp.text) id1 Exp.pp e1;
-              L.out "PROP : %a@\n@." (pp_prop Pp.text) (prop_iter_to_prop tenv iter);
+              L.internal_error "@[<2>#### ERROR: an assumption of the analyzer broken ####@\n";
+              L.internal_error "Broken Assumption: id notin e for all (id,e) in sub@\n";
+              L.internal_error "(id,e) : (%a,%a)@\n" (Ident.pp Pp.text) id1 Exp.pp e1;
+              L.internal_error "PROP : %a@\n@." (pp_prop Pp.text) (prop_iter_to_prop tenv iter);
               assert false
           | Aeq (Var id1, e1) when Ident.equal pid id1 ->
               split pairs_unpid ((id1, e1):: pairs_pid) eqs_cur

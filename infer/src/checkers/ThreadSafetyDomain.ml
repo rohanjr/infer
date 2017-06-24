@@ -23,7 +23,7 @@ module Access = struct
 
   let pp fmt (access_path, access_kind) = match access_kind with
     | Read -> F.fprintf fmt "Read of %a" AccessPath.Raw.pp access_path
-    | Write -> F.fprintf fmt "Write of %a" AccessPath.Raw.pp access_path
+    | Write -> F.fprintf fmt "Write to %a" AccessPath.Raw.pp access_path
 end
 
 module TraceElem = struct
@@ -48,7 +48,7 @@ module TraceElem = struct
 
   let kind { kind; } = kind
 
-  let make kind site = { kind; site; }
+  let make ?indexes:_ kind site = { kind; site; }
 
   let with_callsite t site = { t with site; }
 
@@ -75,14 +75,9 @@ let make_access access_path access_kind loc =
 *)
 module LocksDomain = AbstractDomain.BooleanAnd
 
-(* In this domain false<=true. The intended denotations [[.]] are
-   [[true]] = the set of all states where we know according, to annotations
-             or assertions, that we are on the UI thread (or some oter specific thread).
-   [[false]] = the set of all states
-   The use of || for join in this domain enforces that, to not know for sure you are threaded,
-   it is enough to be unthreaded in one branch. (See RaceWithMainThread.java for  examples)
-*)
-module ThreadsDomain = AbstractDomain.BooleanOr
+module ThreadsDomain = AbstractDomain.BooleanAnd
+
+module ThumbsUpDomain = AbstractDomain.BooleanAnd
 
 module PathDomain = SinkTrace.Make(TraceElem)
 
@@ -161,28 +156,35 @@ module AttributeMapDomain = struct
     add access_path attribute_set t
 end
 
+module Excluder = struct
+  type t =
+    | Thread
+    | Lock
+    | Both
+  [@@deriving compare]
+
+  let pp fmt = function
+    | Thread -> F.fprintf fmt "Thread"
+    | Lock -> F.fprintf fmt "Lock"
+    | Both -> F.fprintf fmt "both Thread and Lock"
+end
+
 module AccessPrecondition = struct
   type t =
-    | Protected
+    | Protected of Excluder.t
     | Unprotected of int option
   [@@deriving compare]
 
   let unprotected = Unprotected None
 
   let pp fmt = function
-    | Protected -> F.fprintf fmt "Protected"
+    | Protected excl -> F.fprintf fmt "ProtectedBy(%a)" Excluder.pp excl
     | Unprotected (Some index) -> F.fprintf fmt "Unprotected(%d)" index
     | Unprotected None -> F.fprintf fmt "Unprotected"
-
-  module Map = PrettyPrintable.MakePPMap(struct
-      type nonrec t = t
-      let compare = compare
-      let pp = pp
-    end)
 end
 
 module AccessDomain = struct
-  include AbstractDomain.Map (AccessPrecondition.Map) (PathDomain)
+  include AbstractDomain.Map (AccessPrecondition) (PathDomain)
 
   let add_access precondition access_path t =
     let precondition_accesses =
@@ -198,23 +200,24 @@ end
 
 type astate =
   {
+    thumbs_up : ThumbsUpDomain.astate;
     threads: ThreadsDomain.astate;
     locks : LocksDomain.astate;
     accesses : AccessDomain.astate;
-    id_map : IdAccessPathMapDomain.astate;
     attribute_map : AttributeMapDomain.astate;
   }
 
-type summary = ThreadsDomain.astate * LocksDomain.astate
-               * AccessDomain.astate * AttributeSetDomain.astate
+type summary =
+  ThumbsUpDomain.astate * ThreadsDomain.astate * LocksDomain.astate
+  * AccessDomain.astate * AttributeSetDomain.astate
 
 let empty =
+  let thumbs_up = true in
   let threads = false in
   let locks = false in
   let accesses = AccessDomain.empty in
-  let id_map = IdAccessPathMapDomain.empty in
   let attribute_map = AccessPath.RawMap.empty in
-  { threads; locks; accesses; id_map; attribute_map; }
+  { thumbs_up; threads; locks; accesses; attribute_map; }
 
 let (<=) ~lhs ~rhs =
   if phys_equal lhs rhs
@@ -223,7 +226,6 @@ let (<=) ~lhs ~rhs =
     ThreadsDomain.(<=) ~lhs:lhs.threads ~rhs:rhs.threads &&
     LocksDomain.(<=) ~lhs:lhs.locks ~rhs:rhs.locks &&
     AccessDomain.(<=) ~lhs:lhs.accesses ~rhs:rhs.accesses &&
-    IdAccessPathMapDomain.(<=) ~lhs:lhs.id_map ~rhs:rhs.id_map &&
     AttributeMapDomain.(<=) ~lhs:lhs.attribute_map ~rhs:rhs.attribute_map
 
 let join astate1 astate2 =
@@ -231,42 +233,43 @@ let join astate1 astate2 =
   then
     astate1
   else
+    let thumbs_up = ThreadsDomain.join astate1.thumbs_up astate2.thumbs_up in
     let threads = ThreadsDomain.join astate1.threads astate2.threads in
     let locks = LocksDomain.join astate1.locks astate2.locks in
     let accesses = AccessDomain.join astate1.accesses astate2.accesses in
-    let id_map = IdAccessPathMapDomain.join astate1.id_map astate2.id_map in
     let attribute_map = AttributeMapDomain.join astate1.attribute_map astate2.attribute_map in
-    { threads; locks; accesses; id_map; attribute_map; }
+    { thumbs_up; threads; locks; accesses; attribute_map; }
 
 let widen ~prev ~next ~num_iters =
   if phys_equal prev next
   then
     prev
   else
+    let thumbs_up = ThreadsDomain.widen ~prev:prev.thumbs_up ~next:next.thumbs_up ~num_iters in
     let threads = ThreadsDomain.widen ~prev:prev.threads ~next:next.threads ~num_iters in
     let locks = LocksDomain.widen ~prev:prev.locks ~next:next.locks ~num_iters in
     let accesses = AccessDomain.widen ~prev:prev.accesses ~next:next.accesses ~num_iters in
-    let id_map = IdAccessPathMapDomain.widen ~prev:prev.id_map ~next:next.id_map ~num_iters in
     let attribute_map =
       AttributeMapDomain.widen ~prev:prev.attribute_map ~next:next.attribute_map ~num_iters in
-    { threads; locks; accesses; id_map; attribute_map; }
+    { thumbs_up; threads; locks; accesses; attribute_map; }
 
-let pp_summary fmt (threads, locks, accesses, return_attributes) =
+let pp_summary fmt (thumbs_up, threads, locks,
+                    accesses, return_attributes) =
   F.fprintf
     fmt
-    "Threads: %a Locks: %a Accesses %a Return Attributes: %a"
+    "\nThumbsUp: %a, Threads: %a, Locks: %a \nAccesses %a \nReturn Attributes: %a\n"
+    ThumbsUpDomain.pp thumbs_up
     ThreadsDomain.pp threads
     LocksDomain.pp locks
     AccessDomain.pp accesses
     AttributeSetDomain.pp return_attributes
 
-let pp fmt { threads; locks; accesses; id_map; attribute_map; } =
+let pp fmt { thumbs_up; threads; locks; accesses; attribute_map; } =
   F.fprintf
     fmt
-    "Threads: %a Locks: %a Accesses %a Id Map: %a Attribute Map:\
-     %a"
+    "\nThumbsUp: %a, Threads: %a, Locks: %a \nAccesses %a \nReturn Attributes: %a\n"
+    ThumbsUpDomain.pp thumbs_up
     ThreadsDomain.pp threads
     LocksDomain.pp locks
     AccessDomain.pp accesses
-    IdAccessPathMapDomain.pp id_map
     AttributeMapDomain.pp attribute_map

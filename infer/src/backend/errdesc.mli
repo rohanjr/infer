@@ -91,6 +91,8 @@ val explain_condition_is_assignment : Location.t -> Localise.error_desc
 val explain_condition_always_true_false :
   Tenv.t -> IntLit.t -> Exp.t -> Procdesc.Node.t -> Location.t -> Localise.error_desc
 
+val explain_unreachable_code_after : Location.t -> Localise.error_desc
+
 (** explain the escape of a stack variable address from its scope *)
 val explain_stack_variable_address_escape :
   Location.t -> Pvar.t -> DecompiledExp.t option -> Localise.error_desc
@@ -130,7 +132,7 @@ val explain_memory_access : Tenv.t -> Localise.deref_str -> 'a Prop.t -> Locatio
 val explain_null_test_after_dereference :
   Tenv.t -> Exp.t -> Procdesc.Node.t -> int -> Location.t -> Localise.error_desc
 
-(** Print a warning to the err stream at the given location (note: only prints in developer mode) *)
+(** warn at the given location *)
 val warning_err : Location.t -> ('a, Format.formatter, unit) format -> 'a
 
 (* offset of an expression found following a program variable *)

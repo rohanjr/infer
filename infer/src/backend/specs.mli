@@ -114,10 +114,9 @@ type stats =
   }
 
 (** Analysis status of the procedure:
-    - Initialized means that the summary has been created by the procedure has not been analyzed yet
-    - Active meas that the procedure is being analyzed
+    - Pending means that the summary has been created by the procedure has not been analyzed yet
     - Analyzed means that the analysis of the procedure is finished *)
-type status = Initialized | Active | Analyzed
+type status = Pending | Analyzed
 
 val equal_status : status -> status -> bool
 
@@ -138,6 +137,7 @@ type payload =
     crashcontext_frame: Stacktree_j.stacktree option;
     (** Procedure location and blame_range info for crashcontext analysis *)
     quandary : QuandarySummary.t option;
+    resources : ResourceLeakDomain.summary option;
     siof : SiofDomain.astate option;
     threadsafety : ThreadSafetyDomain.summary option;
     buffer_overrun : BufferOverrunDomain.Summary.t option;
@@ -154,6 +154,9 @@ type summary = {
   attributes : ProcAttributes.t; (** Attributes of the procedure *)
   proc_desc_option : Procdesc.t option;
 }
+
+(** dummy summary for testing *)
+val dummy : summary
 
 (** Add the summary to the table for the given function *)
 val add_summary : Typ.Procname.t -> summary -> unit
@@ -200,9 +203,6 @@ val get_summary_unsafe : string -> Typ.Procname.t -> summary
 (** Return the status (active v.s. inactive) of a procedure summary *)
 val get_status : summary -> status
 
-(** Check if the procedure is active *)
-val is_active : summary -> bool
-
 (** Initialize the summary for [proc_name] given dependent procs in list [depend_list].
     This also stores the new summary in the spec table. *)
 val init_summary :
@@ -214,7 +214,7 @@ val init_summary :
   -> summary
 
 (** Reset a summary rebuilding the dependents and preserving the proc attributes if present. *)
-val reset_summary : Typ.Procname.t -> ProcAttributes.t option -> Procdesc.t option -> summary
+val reset_summary : Procdesc.t -> summary
 
 (** Load procedure summary from the given file *)
 val load_summary : DB.filename -> summary option
@@ -253,9 +253,6 @@ val proc_resolve_attributes : Typ.Procname.t -> ProcAttributes.t option
 (** Check if the procedure is from a library:
     It's not defined, and there is no spec file for it. *)
 val proc_is_library : ProcAttributes.t -> bool
-
-(** Set the current status for the proc *)
-val set_status : Typ.Procname.t -> status -> unit
 
 (** Convert spec into normal form w.r.t. variable renaming *)
 val spec_normalize : Tenv.t -> Prop.normal spec -> NormSpec.t

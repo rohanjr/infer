@@ -7,8 +7,10 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *)
 
-module CallSites = AbstractDomain.FiniteSet (CallSite.Set)
+open! IStd
 
-module SinkMap = AbstractDomain.Map (Typ.Procname.Map) (CallSites)
+module CallSites = AbstractDomain.FiniteSet (CallSite)
 
-include AbstractDomain.Map (Annot.Map) (SinkMap)
+module SinkMap = AbstractDomain.Map (Typ.Procname) (CallSites)
+
+include AbstractDomain.Map (Annot) (SinkMap)

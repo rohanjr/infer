@@ -14,6 +14,7 @@ type keyword =
   | Suggestion
   | Severity
   | Mode
+  | Doc_url
 
 type formula_id = Formula_id of string
 
@@ -43,4 +44,12 @@ val is_severity_keyword : keyword -> bool
 
 val is_mode_keyword : keyword -> bool
 
+val is_doc_url_keyword : keyword -> bool
+
+val str_match_regex : string -> string -> bool
+
+val compare_str_with_alexp : string -> alexp -> bool
+
 module FormulaIdMap : Caml.Map.S with type key = formula_id
+
+module VarMap : Caml.Map.S with type key = string

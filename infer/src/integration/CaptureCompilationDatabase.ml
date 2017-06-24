@@ -9,8 +9,10 @@
 
 open! IStd
 
-module CLOpt = CommandLineOption
 module F = Format
+
+module CLOpt = CommandLineOption
+module L = Logging
 
 let capture_text =
   if Config.equal_analyzer Config.analyzer Config.Linters then "linting"
@@ -22,7 +24,7 @@ let should_capture_file_from_index () =
   | None ->
       (match Config.changed_files_index with
        | Some index ->
-           Process.print_error_and_exit "Error reading the changed files index %s.\n%!" index
+           Process.print_error_and_exit "Error reading the changed files index %s.@\n%!" index
        | None -> function _ -> true)
   | Some files_set ->
       function source_file -> SourceFile.Set.mem source_file files_set
@@ -58,13 +60,13 @@ let run_compilation_file compilation_database file =
            (Option.to_list (Sys.getenv CLOpt.args_env_var) @ ["--fcp-syntax-only"]))] in
     (Some compilation_data.dir, wrapper_cmd, args, env)
   with Not_found ->
-    Process.print_error_and_exit "Failed to find compilation data for %a \n%!"
+    Process.print_error_and_exit "Failed to find compilation data for %a@\n%!"
       SourceFile.pp file
 
 let run_compilation_database compilation_database should_capture_file =
   let number_of_files = CompilationDatabase.get_size compilation_database in
-  Logging.out "Starting %s %d files \n%!" capture_text number_of_files;
-  Logging.stdout "Starting %s %d files \n%!" capture_text number_of_files;
+  L.(debug Capture Quiet) "Starting %s %d files@\n%!" capture_text number_of_files;
+  L.progress "Starting %s %d files@\n%!" capture_text number_of_files;
   let jobs_stack = create_files_stack compilation_database should_capture_file in
   let capture_text_upper = String.capitalize capture_text in
   let job_to_string =
@@ -84,21 +86,24 @@ let get_compilation_database_files_buck ~prog ~args =
   | build :: args_with_flavor -> (
       let build_args = build :: "--config" :: "*//cxx.pch_enabled=false" :: args_with_flavor in
       Process.create_process_and_wait ~prog ~args:build_args;
+      (* The option --keep-going is not accepted in the command buck targets *)
+      let args_with_flavor_no_keep_going =
+        List.filter ~f:(fun s -> not (String.equal s "--keep-going")) args_with_flavor in
       let buck_targets_shell =
-        prog :: "targets" :: "--show-output" :: args_with_flavor
+        prog :: "targets" :: "--show-output" :: args_with_flavor_no_keep_going
         |> Utils.shell_escape_command in
       let (output, exit_or_signal) =
         Utils.with_process_in buck_targets_shell In_channel.input_lines in
       match exit_or_signal with
       | Error _ as status ->
-          failwithf "*** ERROR: command failed:@\n*** %s@\n*** %s@."
+          failwithf "*** command failed:@\n*** %s@\n*** %s@."
             buck_targets_shell
             (Unix.Exit_or_signal.to_string_hum status)
       | Ok () ->
           match output with
-          | [] -> Logging.stderr "There are no files to process, exiting@."; exit 0
+          | [] -> L.external_error "There are no files to process, exiting@."; exit 0
           | lines ->
-              Logging.out "Reading compilation database from:@\n%s@\n"
+              L.(debug Capture Quiet) "Reading compilation database from:@\n%s@\n"
                 (String.concat ~sep:"\n" lines);
               (* this assumes that flavors do not contain spaces *)
               let split_regex = Str.regexp "#[^ ]* " in
@@ -118,14 +123,12 @@ let get_compilation_database_files_buck ~prog ~args =
 
 (** Compute the compilation database files. *)
 let get_compilation_database_files_xcodebuild ~prog ~args =
-  let temp_dir = Config.results_dir ^/ "clang" in
-  Utils.create_dir temp_dir;
-  let tmp_file = Filename.temp_file ~in_dir:temp_dir "cdb" ".json" in
+  let tmp_file = Filename.temp_file "cdb" ".json" in
   let xcodebuild_prog, xcodebuild_args = prog, prog::args in
   let xcpretty_prog = "xcpretty" in
   let xcpretty_args =
     [xcpretty_prog; "--report"; "json-compilation-database"; "--output"; tmp_file] in
-  Logging.out "Running %s | %s\n@." (List.to_string ~f:Fn.id xcodebuild_args)
+  L.(debug Capture Quiet) "Running %s | %s@\n@." (List.to_string ~f:Fn.id xcodebuild_args)
     (List.to_string ~f:Fn.id xcpretty_args);
   let producer_status, consumer_status =
     Process.pipeline
@@ -134,7 +137,7 @@ let get_compilation_database_files_xcodebuild ~prog ~args =
   match producer_status, consumer_status with
   | Ok (), Ok () -> [`Escaped tmp_file]
   | _ ->
-      Logging.stderr "There was an error executing the build command";
+      L.external_error "There was an error executing the build command";
       exit 1
 
 let capture_files_in_database compilation_database =

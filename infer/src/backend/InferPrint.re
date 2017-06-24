@@ -18,7 +18,7 @@ module L = Logging;
 module F = Format;
 
 let print_usage_exit err_s => {
-  L.stderr "Load Error: %s@.@." err_s;
+  L.user_error "Load Error: %s@\n@." err_s;
   Config.print_usage_exit ()
 };
 
@@ -60,7 +60,16 @@ let error_advice_to_csv_string error_desc => {
 
 let error_desc_to_plain_string error_desc => {
   let pp fmt => F.fprintf fmt "%a" Localise.pp_error_desc error_desc;
-  F.asprintf "%t" pp
+  let s = F.asprintf "%t" pp;
+  let s = String.strip s;
+  let s =
+    /* end error description with a dot */
+    if (String.is_suffix suffix::"." s) {
+      s
+    } else {
+      s ^ "."
+    };
+  s
 };
 
 let error_desc_to_dotty_string error_desc => Localise.error_desc_get_dotty error_desc;
@@ -91,6 +100,8 @@ let get_bug_hash
   )
 };
 
+let exception_value = "exception";
+
 let loc_trace_to_jsonbug_record trace_list ekind =>
   switch ekind {
   | Exceptions.Kinfo => []
@@ -102,7 +113,7 @@ let loc_trace_to_jsonbug_record trace_list ekind =>
           {Jsonbug_j.tag: Io_infer.Xml.tag_branch, value: Printf.sprintf "%B" cond}
         ]
       | Errlog.Exception exn_name =>
-        let res = [{Jsonbug_j.tag: Io_infer.Xml.tag_kind, value: "exception"}];
+        let res = [{Jsonbug_j.tag: Io_infer.Xml.tag_kind, value: exception_value}];
         let exn_str = Typ.Name.name exn_name;
         if (String.is_empty exn_str) {
           res
@@ -124,18 +135,13 @@ let loc_trace_to_jsonbug_record trace_list ekind =>
       Jsonbug_j.level: trace_item.Errlog.lt_level,
       filename: SourceFile.to_string trace_item.Errlog.lt_loc.Location.file,
       line_number: trace_item.Errlog.lt_loc.Location.line,
+      column_number: trace_item.Errlog.lt_loc.Location.col,
       description: trace_item.Errlog.lt_description,
       node_tags: List.concat_map f::tag_value_records_of_node_tag trace_item.Errlog.lt_node_tags
     };
     let record_list = List.rev (List.rev_map f::trace_item_to_record trace_list);
     record_list
   };
-
-let error_desc_to_qualifier_tags_records error_desc => {
-  let tag_value_pairs = Localise.error_desc_to_tag_value_pairs error_desc;
-  let tag_value_to_record (tag, value) => {Jsonbug_j.tag: tag, value};
-  List.map f::(fun tag_value => tag_value_to_record tag_value) tag_value_pairs
-};
 
 type summary_val = {
   vname: string,
@@ -253,34 +259,19 @@ module ProcsCsv = {
   };
 };
 
-let paths_to_filter =
-  Option.bind Config.filter_report_paths (fun f => Some (In_channel.read_lines f)) |>
-  Option.map f::(List.map f::SourceFile.create);
-
-let report_filter source_file =>
-  switch paths_to_filter {
-  | Some paths => List.mem equal::SourceFile.equal paths source_file
-  | None => true
-  };
-
 let should_report (issue_kind: Exceptions.err_kind) issue_type error_desc eclass =>
   if (not Config.filtering || Exceptions.equal_err_class eclass Exceptions.Linters) {
     true
   } else {
     let analyzer_is_whitelisted =
       switch Config.analyzer {
+      | Eradicate => true
+      | BiAbduction
+      | CaptureOnly
       | Checkers
-      | Eradicate
-      | Siof
-      | Tracing => true
-      | Bufferoverrun
-      | Capture
-      | Compile
+      | CompileOnly
       | Crashcontext
-      | Infer
-      | Linters
-      | Quandary
-      | Threadsafety => false
+      | Linters => false
       };
     if analyzer_is_whitelisted {
       true
@@ -290,7 +281,8 @@ let should_report (issue_kind: Exceptions.err_kind) issue_type error_desc eclass
         | Kinfo => true
         | Kerror
         | Kwarning
-        | Kadvice => false
+        | Kadvice
+        | Klike => false
         };
       if issue_kind_is_blacklisted {
         false
@@ -316,25 +308,25 @@ let should_report (issue_kind: Exceptions.err_kind) issue_type error_desc eclass
           };
           issue_bucket_is_high
         } else {
-          let issue_type_is_reportable = {
-            let reportable_issue_types =
-              Localise.[
-                Localise.from_string Config.default_failure_name,
-                context_leak,
-                double_lock,
-                empty_vector_access,
-                memory_leak,
-                quandary_taint_error,
-                resource_leak,
-                retain_cycle,
-                static_initialization_order_fiasco,
-                tainted_value_reaching_sensitive_function,
-                thread_safety_violation,
-                unsafe_guarded_by_access
-              ];
-            List.mem equal::Localise.equal reportable_issue_types issue_type
-          };
-          issue_type_is_reportable
+          let blacklisted_by_default =
+            Localise.[
+              analysis_stops,
+              divide_by_zero,
+              return_value_ignored,
+              array_out_of_bounds_l1,
+              array_out_of_bounds_l2,
+              array_out_of_bounds_l3,
+              null_test_after_dereference,
+              class_cast_exception,
+              uninitialized_value,
+              stack_variable_address_escape,
+              dangling_pointer_dereference,
+              unary_minus_applied_to_unsigned_expression,
+              condition_always_true,
+              condition_always_false,
+              retain_cycle
+            ];
+          not (List.mem equal::Localise.equal blacklisted_by_default issue_type)
         }
       }
     }
@@ -375,8 +367,7 @@ module IssuesCsv = {
       if (
         key.in_footprint &&
         error_filter source_file key.err_desc key.err_name &&
-        should_report key.err_kind key.err_name key.err_desc err_data.err_class &&
-        report_filter source_file
+        should_report key.err_kind key.err_name key.err_desc err_data.err_class
       ) {
         let err_desc_string = error_desc_to_csv_string key.err_desc;
         let err_advice_string = error_advice_to_csv_string key.err_desc;
@@ -434,7 +425,7 @@ let potential_exception_message = "potential exception at line";
 module IssuesJson = {
   let is_first_item = ref true;
   let pp_json_open fmt () => F.fprintf fmt "[@?";
-  let pp_json_close fmt () => F.fprintf fmt "]\n@?";
+  let pp_json_close fmt () => F.fprintf fmt "]@\n@?";
 
   /** Write bug report in JSON format */
   let pp_issues_of_error_log fmt error_filter _ proc_loc_opt procname err_log => {
@@ -445,6 +436,16 @@ module IssuesJson = {
         | Some proc_loc => (proc_loc.Location.file, proc_loc.Location.line)
         | None => (err_data.loc.Location.file, 0)
         };
+      if (SourceFile.is_invalid source_file) {
+        failwithf
+          "Invalid source file for %a %a@.Trace: %a@."
+          Localise.pp
+          key.err_name
+          Localise.pp_error_desc
+          key.err_desc
+          Errlog.pp_loc_trace
+          err_data.loc_trace
+      };
       let should_report_source_file =
         not (SourceFile.is_infer_model source_file) ||
         Config.debug_mode || Config.debug_exceptions;
@@ -452,8 +453,7 @@ module IssuesJson = {
         key.in_footprint &&
         error_filter source_file key.err_desc key.err_name &&
         should_report_source_file &&
-        should_report key.err_kind key.err_name key.err_desc err_data.err_class &&
-        report_filter source_file
+        should_report key.err_kind key.err_name key.err_desc err_data.err_class
       ) {
         let kind = Exceptions.err_kind_string key.err_kind;
         let bug_type = Localise.to_issue_id key.err_name;
@@ -475,7 +475,7 @@ module IssuesJson = {
               let potential_exception_message =
                 Format.asprintf
                   "%a: %s %d" MarkupFormatter.pp_bold "Note" potential_exception_message line;
-              Format.sprintf "%s\n%s" base_qualifier potential_exception_message
+              Format.sprintf "%s@\n%s" base_qualifier potential_exception_message
             }
           } else {
             base_qualifier
@@ -496,13 +496,15 @@ module IssuesJson = {
           file,
           bug_trace: loc_trace_to_jsonbug_record err_data.loc_trace key.err_kind,
           key: err_data.node_id_key.node_key,
-          qualifier_tags: error_desc_to_qualifier_tags_records key.err_desc,
+          qualifier_tags: Localise.Tags.tag_value_records_of_tags key.err_desc.tags,
           hash:
             get_bug_hash kind bug_type procedure_id file err_data.node_id_key.node_key key.err_desc,
           dotty: error_desc_to_dotty_string key.err_desc,
           infer_source_loc: json_ml_loc,
           bug_type_hum: Localise.to_human_readable_string key.err_name,
-          linters_def_file: err_data.linters_def_file
+          linters_def_file: err_data.linters_def_file,
+          doc_url: err_data.doc_url,
+          traceview_id: None
         };
         if (not !is_first_item) {
           pp ","
@@ -641,6 +643,7 @@ module Stats = {
     mutable nerrors: int,
     mutable ninfos: int,
     mutable nadvice: int,
+    mutable nlikes: int,
     mutable nprocs: int,
     mutable nspecs: int,
     mutable ntimeouts: int,
@@ -655,6 +658,7 @@ module Stats = {
     nerrors: 0,
     ninfos: 0,
     nadvice: 0,
+    nlikes: 0,
     nprocs: 0,
     nspecs: 0,
     ntimeouts: 0,
@@ -722,6 +726,7 @@ module Stats = {
         | Exceptions.Kwarning => stats.nwarnings = stats.nwarnings + 1
         | Exceptions.Kinfo => stats.ninfos = stats.ninfos + 1
         | Exceptions.Kadvice => stats.nadvice = stats.nadvice + 1
+        | Exceptions.Klike => stats.nlikes = stats.nlikes + 1
         }
       }
     };
@@ -787,10 +792,8 @@ module Report = {
 module Summary = {
   let pp_summary_out summary => {
     let proc_name = Specs.get_proc_name summary;
-    if Config.quiet {
-      ()
-    } else {
-      L.stdout "Procedure: %a@\n%a@." Typ.Procname.pp proc_name Specs.pp_summary_text summary
+    if (CLOpt.equal_command Config.command CLOpt.Report && not Config.quiet) {
+      L.result "Procedure: %a@\n%a@." Typ.Procname.pp proc_name Specs.pp_summary_text summary
     }
   };
 
@@ -864,24 +867,24 @@ module PreconditionStats = {
     switch (Prop.CategorizePreconditions.categorize preconditions) {
     | Prop.CategorizePreconditions.Empty =>
       incr nr_empty;
-      L.stdout "Procedure: %a footprint:Empty@." Typ.Procname.pp proc_name
+      L.result "Procedure: %a footprint:Empty@." Typ.Procname.pp proc_name
     | Prop.CategorizePreconditions.OnlyAllocation =>
       incr nr_onlyallocation;
-      L.stdout "Procedure: %a footprint:OnlyAllocation@." Typ.Procname.pp proc_name
+      L.result "Procedure: %a footprint:OnlyAllocation@." Typ.Procname.pp proc_name
     | Prop.CategorizePreconditions.NoPres =>
       incr nr_nopres;
-      L.stdout "Procedure: %a footprint:NoPres@." Typ.Procname.pp proc_name
+      L.result "Procedure: %a footprint:NoPres@." Typ.Procname.pp proc_name
     | Prop.CategorizePreconditions.DataConstraints =>
       incr nr_dataconstraints;
-      L.stdout "Procedure: %a footprint:DataConstraints@." Typ.Procname.pp proc_name
+      L.result "Procedure: %a footprint:DataConstraints@." Typ.Procname.pp proc_name
     }
   };
   let pp_stats () => {
-    L.stdout "@.Precondition stats@.";
-    L.stdout "Procedures with no preconditions: %d@." !nr_nopres;
-    L.stdout "Procedures with empty precondition: %d@." !nr_empty;
-    L.stdout "Procedures with only allocation conditions: %d@." !nr_onlyallocation;
-    L.stdout "Procedures with data constraints: %d@." !nr_dataconstraints
+    L.result "@.Precondition stats@.";
+    L.result "Procedures with no preconditions: %d@." !nr_nopres;
+    L.result "Procedures with empty precondition: %d@." !nr_empty;
+    L.result "Procedures with only allocation conditions: %d@." !nr_onlyallocation;
+    L.result "Procedures with data constraints: %d@." !nr_dataconstraints
   };
 };
 
@@ -1024,7 +1027,7 @@ let pp_summary_by_report_kind
 
 let pp_json_report_by_report_kind formats_by_report_kind fname =>
   switch (Utils.read_file fname) {
-  | Some report_lines =>
+  | Ok report_lines =>
     let pp_json_issues format_list report => {
       let pp_json_issue (format_kind, outf: Utils.outfile) =>
         switch format_kind {
@@ -1046,7 +1049,7 @@ let pp_json_report_by_report_kind formats_by_report_kind fname =>
       | _ => ()
       };
     List.iter f::pp_report_by_report_kind formats_by_report_kind
-  | None => failwithf "Error reading %s. Does the file exist?" fname
+  | Error error => failwithf "Error reading '%s': %s" fname error
   };
 
 let pp_lint_issues_by_report_kind formats_by_report_kind error_filter linereader procname error_log => {
@@ -1125,8 +1128,8 @@ module AnalysisResults = {
     let load_file fname =>
       switch (Specs.load_summary (DB.filename_from_string fname)) {
       | None =>
-        L.stderr "Error: cannot open file %s@." fname;
-        exit 0
+        L.user_error "Error: cannot open file %s@." fname;
+        exit 1
       | Some summary => summaries := [(fname, summary), ...!summaries]
       };
     apply_without_gc (List.iter f::load_file) (spec_files_from_cmdline ());
@@ -1152,8 +1155,8 @@ module AnalysisResults = {
     let do_spec f fname =>
       switch (Specs.load_summary (DB.filename_from_string fname)) {
       | None =>
-        L.stderr "Error: cannot open file %s@." fname;
-        exit 0
+        L.user_error "Error: cannot open file %s@." fname;
+        exit 1
       | Some summary => f (fname, summary)
       };
     let iterate f => List.iter f::(do_spec f) sorted_spec_files;
@@ -1190,8 +1193,8 @@ module AnalysisResults = {
       switch (load_analysis_results_from_file (DB.filename_from_string fname)) {
       | Some r => iterator_of_summary_list r
       | None =>
-        L.stderr "Error: cannot open analysis results file %s@." fname;
-        exit 0
+        L.user_error "Error: cannot open analysis results file %s@." fname;
+        exit 1
       }
     }
   };
@@ -1308,8 +1311,8 @@ let main ::report_csv ::report_json => {
     (Stats, init_stats_format_list ()),
     (Summary, init_summary_format_list ())
   ];
-  if (not Config.buck_cache_mode) {
-    register_perf_stats_report ()
-  };
+  register_perf_stats_report ();
   print_issues formats_by_report_kind
 };
+
+let main_from_config () => main report_csv::Config.bugs_csv report_json::Config.bugs_json;

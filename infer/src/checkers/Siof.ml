@@ -172,9 +172,6 @@ end
 
 module Analyzer = AbstractInterpreter.Make (ProcCfg.Normal) (TransferFunctions)
 
-module Interprocedural = AbstractInterpreter.Interprocedural (Summary)
-
-
 let is_foreign tu_opt (v, _) =
   match Pvar.get_translation_unit v, tu_opt with
   | TUFile v_tu, Some current_tu ->
@@ -211,7 +208,7 @@ let report_siof summary trace pdesc gname loc =
     let ltr = SiofTrace.trace_of_error loc gname sink_path' in
     let msg = Localise.to_issue_id Localise.static_initialization_order_fiasco in
     let exn = Exceptions.Checkers (msg, Localise.verbatim_desc description) in
-    Reporting.log_error_from_summary summary ~loc ~ltr exn in
+    Reporting.log_error summary ~loc ~ltr exn in
 
   let has_foreign_sink (_, path) =
     List.exists
@@ -239,23 +236,16 @@ let siof_check pdesc gname (summary : Specs.summary) =
   | Some (SiofDomain.BottomSiofTrace.Bottom, _) | None ->
       ()
 
-let compute_post proc_data =
-  Analyzer.compute_post proc_data
-    ~initial:(SiofDomain.BottomSiofTrace.Bottom, SiofDomain.VarNames.empty)
-  |> Option.map ~f:SiofDomain.normalize
-
-let checker ({ Callbacks.proc_desc } as callback) : Specs.summary =
+let checker { Callbacks.proc_desc; tenv; summary; } : Specs.summary =
+  let proc_data = ProcData.make_default proc_desc tenv in
+  let initial = SiofDomain.BottomSiofTrace.Bottom, SiofDomain.VarNames.empty in
   let updated_summary =
-    Interprocedural.compute_and_store_post
-      ~compute_post
-      ~make_extras:ProcData.make_empty_extras
-      callback in
-  let pname = Procdesc.get_proc_name proc_desc in
+    match Analyzer.compute_post proc_data ~initial with
+    | Some post -> Summary.update_summary (SiofDomain.normalize post) summary
+    | None -> summary in
   begin
-    match Typ.Procname.get_global_name_of_initializer pname with
-    | Some gname ->
-        siof_check proc_desc gname updated_summary
-    | None ->
-        ()
+    match Typ.Procname.get_global_name_of_initializer (Procdesc.get_proc_name proc_desc) with
+    | Some gname -> siof_check proc_desc gname updated_summary
+    | None -> ()
   end;
   updated_summary

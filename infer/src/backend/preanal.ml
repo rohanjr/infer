@@ -95,7 +95,7 @@ module BackwardCfg = ProcCfg.OneInstrPerNode(ProcCfg.Backward(ProcCfg.Exceptiona
 
 module LivenessAnalysis = AbstractInterpreter.Make (BackwardCfg) (Liveness.TransferFunctions)
 
-module VarDomain = AbstractDomain.FiniteSet(Var.Set)
+module VarDomain = Liveness.Domain
 
 (** computes the non-nullified reaching definitions at the end of each node by building on the
     results of a liveness analysis to be precise, what we want to compute is:
@@ -170,26 +170,6 @@ module NullifyAnalysis =
     (Scheduler.ReversePostorder (ProcCfg.Exceptional))
     (NullifyTransferFunctions)
 
-(** remove dead stores whose lhs is a frontend-created temporary variable. these dead stores are
-    created by copy-propagation *)
-let remove_dead_frontend_stores pdesc liveness_inv_map =
-  let is_live var instr_id liveness_inv_map =
-    match LivenessAnalysis.extract_pre instr_id liveness_inv_map with
-    | Some pre -> VarDomain.mem var pre
-    | None -> true in
-  let is_used_store (instr, instr_id_opt) =
-    match instr, instr_id_opt with
-    | Sil.Load (id, _, _, _), Some instr_id when not (Ident.is_none id) ->
-        is_live (Var.of_id id) instr_id liveness_inv_map
-    | _ -> true in
-  let node_remove_dead_stores node =
-    let instr_nodes = BackwardCfg.instr_ids node in
-    let instr_nodes' = IList.filter_changed is_used_store instr_nodes in
-    if not (phys_equal instr_nodes' instr_nodes)
-    then
-      Procdesc.Node.replace_instrs node (List.rev_map ~f:fst instr_nodes') in
-  Procdesc.iter_nodes node_remove_dead_stores pdesc
-
 let add_nullify_instrs pdesc tenv liveness_inv_map =
   let address_taken_vars =
     if Typ.Procname.is_java (Procdesc.get_proc_name pdesc)
@@ -228,7 +208,7 @@ let add_nullify_instrs pdesc tenv liveness_inv_map =
         match NullifyAnalysis.extract_post (ProcCfg.Exceptional.id node) nullify_inv_map with
         | Some (_, to_nullify) ->
             let pvars_to_nullify, ids_to_remove =
-              Var.Set.fold
+              VarDomain.fold
                 (fun var (pvars_acc, ids_acc) -> match Var.to_exp var with
                    (* we nullify all address taken variables at the end of the procedure *)
                    | Exp.Lvar pvar when not (AddressTaken.Domain.mem pvar address_taken_vars) ->

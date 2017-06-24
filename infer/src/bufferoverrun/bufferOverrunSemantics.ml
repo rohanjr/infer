@@ -24,9 +24,9 @@ struct
 
   let eval_const : Const.t -> Val.t
     = function
-      | Const.Cint intlit -> (try Val.of_int (IntLit.to_int intlit) with _ -> Val.top_itv)
+      | Const.Cint intlit -> (try Val.of_int (IntLit.to_int intlit) with _ -> Val.Itv.top)
       | Const.Cfloat f -> f |> int_of_float |> Val.of_int
-      | _ -> Val.top_itv       (* TODO *)
+      | _ -> Val.Itv.top       (* TODO *)
 
   let sizeof_ikind : Typ.ikind -> int
     = function
@@ -49,8 +49,9 @@ struct
     | Typ.Tfloat fkind -> sizeof_fkind fkind
     | Typ.Tvoid -> 1
     | Typ.Tptr (_, _) -> 4
-    | Typ.Tstruct _ -> 4        (* TODO *)
-    | Typ.Tarray (typ, Some ilit) -> sizeof typ * IntLit.to_int ilit
+    | Typ.Tstruct _ | Typ.TVar _ -> 4        (* TODO *)
+    | Typ.Tarray (_, Some length, Some stride) -> IntLit.to_int stride * IntLit.to_int length
+    | Typ.Tarray (typ, Some length, None) -> sizeof typ * IntLit.to_int length
     | _ -> 4
 
   let rec must_alias : Exp.t -> Exp.t -> Mem.astate -> bool
@@ -156,20 +157,20 @@ struct
         | Exp.Cast (_, e) -> eval e mem loc
         | Exp.Lfield (e, fn, _) ->
             eval e mem loc
-            |> Val.get_all_locs
+            |> Val.get_array_locs
             |> Fn.flip PowLoc.append_field fn
             |> Val.of_pow_loc
         | Exp.Lindex (e1, _) ->
-            let arr = eval e1 mem loc in (* must have array blk *)
+            let arr = eval e1 mem loc |> Val.get_array_blk in (* must have array blk *)
             (* let idx = eval e2 mem loc in *)
-            let ploc = arr |> Val.get_array_blk |> ArrayBlk.get_pow_loc in
+            let ploc = if ArrayBlk.is_bot arr then PowLoc.unknown else ArrayBlk.get_pow_loc arr in
             (* if nested array, add the array blk *)
             let arr = Mem.find_heap_set ploc mem in
             Val.join (Val.of_pow_loc ploc) arr
         | Exp.Sizeof {nbytes=Some size} -> Val.of_int size
         | Exp.Sizeof {typ; nbytes=None} -> Val.of_int (sizeof typ)
         | Exp.Exn _
-        | Exp.Closure _ -> Val.top_itv
+        | Exp.Closure _ -> Val.Itv.top
 
   and eval_unop : Unop.t -> Exp.t -> Mem.astate -> Location.t -> Val.t
     = fun unop e mem loc ->
@@ -213,6 +214,33 @@ struct
       | Binop.LOr -> Val.lor_sem v1 v2
       | Binop.PtrFld -> raise Not_implemented
 
+  let rec eval_locs : Exp.t -> Mem.astate -> Location.t -> Val.t
+    = fun exp mem loc ->
+      match exp with
+      | Exp.Var id ->
+          (match Mem.find_alias id mem with
+           | Some pvar ->
+               Var.of_pvar pvar |> Loc.of_var |> PowLoc.singleton |> Val.of_pow_loc
+           | None -> Val.bot)
+      | Exp.Lvar pvar ->
+          pvar |> Loc.of_pvar |> PowLoc.singleton |> Val.of_pow_loc
+      | Exp.BinOp (bop, e1, e2) -> eval_binop bop e1 e2 mem loc
+      | Exp.Cast (_, e) -> eval_locs e mem loc
+      | Exp.Lfield (e, fn, _) ->
+          eval e mem loc
+          |> Val.get_all_locs
+          |> Fn.flip PowLoc.append_field fn
+          |> Val.of_pow_loc
+      | Exp.Lindex (e1, e2) ->
+          let arr = eval e1 mem loc in
+          let idx = eval e2 mem loc in
+          Val.plus_pi arr idx
+      | Exp.Const _
+      | Exp.UnOp _
+      | Exp.Sizeof _
+      | Exp.Exn _
+      | Exp.Closure _ -> Val.bot
+
   let get_allocsite : Typ.Procname.t -> CFG.node -> int -> int -> string
     = fun proc_name node inst_num dimension ->
       let proc_name = Typ.Procname.to_string proc_name in
@@ -251,7 +279,7 @@ struct
                let v = Mem.find_heap lv mem in
                let itv_v =
                  if Itv.is_bot (Val.get_itv v) then Itv.bot else
-                   Val.get_itv Val.zero
+                   Itv.false_sem
                in
                let v' = Val.modify_itv itv_v v in
                Mem.update_mem (PowLoc.singleton lv) v' mem
@@ -355,14 +383,14 @@ struct
       let get_size v = v |> Val.get_array_blk |> ArrayBlk.sizeof in
       let get_field_name (fn, _, _) = fn in
       let deref_field v fn mem =
-        Mem.find_heap_set (PowLoc.append_field (Val.get_all_locs v) fn) mem
+        Mem.find_heap_set (PowLoc.append_field (Val.get_array_locs v) fn) mem
       in
-      let deref_ptr v mem = Mem.find_heap_set (Val.get_all_locs v) mem in
+      let deref_ptr v mem = Mem.find_heap_set (Val.get_array_locs v) mem in
       let add_pair_itv itv1 itv2 l =
         let open Itv in
-        if itv1 <> bot && itv2 <> bot then
+        if itv1 <> bot && itv1 <> top && itv2 <> bot then
           (lb itv1, lb itv2) :: (ub itv1, ub itv2) :: l
-        else if itv1 <> bot && Itv.eq itv2 bot then
+        else if itv1 <> bot && itv1 <> top && Itv.eq itv2 bot then
           (lb itv1, Bound.Bot) :: (ub itv1, Bound.Bot) :: l
         else
           l
@@ -399,11 +427,14 @@ struct
     = fun pairs ->
       let add_pair map (formal, actual) =
         match formal with
+        | Itv.Bound.Linear (_, se1) when Itv.SymLinear.is_zero se1 -> map
         | Itv.Bound.Linear (0, se1) when Itv.SymLinear.cardinal se1 > 0 ->
             let (symbol, coeff) = Itv.SymLinear.choose se1 in
             if Int.equal coeff 1
             then Itv.SubstMap.add symbol actual map
             else assert false
+        | Itv.Bound.MinMax (Itv.Bound.Max, 0, symbol) ->
+            Itv.SubstMap.add symbol actual map
         | _ -> assert false
       in
       List.fold ~f:add_pair ~init:Itv.SubstMap.empty pairs
@@ -430,6 +461,6 @@ struct
       in
       let formals = get_formals callee_pdesc in
       let actuals = List.map ~f:(fun (a, _) -> eval a caller_mem loc) params in
-      list_fold2_def ~default:Val.top_itv ~f:add_pair formals actuals ~init:[]
+      list_fold2_def ~default:Val.Itv.top ~f:add_pair formals actuals ~init:[]
       |> subst_map_of_pairs
 end

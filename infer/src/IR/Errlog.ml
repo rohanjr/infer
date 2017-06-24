@@ -27,6 +27,12 @@ type loc_trace_elem = {
   lt_node_tags : node_tag list (** tags describing the node at the current location *)
 }
 
+let pp_loc_trace_elem fmt { lt_level; lt_loc; } =
+  F.fprintf fmt "%d %a" lt_level Location.pp lt_loc
+
+let pp_loc_trace fmt l =
+  PrettyPrintable.pp_collection ~pp_item:pp_loc_trace_elem fmt l
+
 let contains_exception loc_trace_elem =
   let pred nt =
     match nt with
@@ -76,7 +82,8 @@ type err_data = {
   loc_trace : loc_trace;
   err_class : Exceptions.err_class;
   visibility : Exceptions.visibility;
-  linters_def_file : string option
+  linters_def_file : string option;
+  doc_url : string option;
 }
 
 let compare_err_data err_data1 err_data2 =
@@ -125,11 +132,6 @@ type iter_fun = err_key -> err_data -> unit
 
 (** Apply f to nodes and error names *)
 let iter (f: iter_fun) (err_log: t) =
-  ErrLogHash.iter (fun err_key set ->
-      ErrDataSet.iter (fun err_data -> f err_key err_data) set)
-    err_log
-
-let iter_filter (f: iter_fun) (err_log: t) =
   ErrLogHash.iter (fun err_key set ->
       ErrDataSet.iter (fun err_data -> f err_key err_data) set)
     err_log
@@ -215,7 +217,7 @@ let update errlog_old errlog_new =
     (fun err_key l ->
        ignore (add_issue errlog_old err_key l)) errlog_new
 
-let log_issue err_kind err_log loc (node_id, node_key) session ltr ?linters_def_file exn =
+let log_issue err_kind err_log loc (node_id, node_key) session ltr ?linters_def_file ?doc_url exn =
   let err_name, err_desc, ml_loc_opt, visibility, severity, force_kind, eclass =
     Exceptions.recognize_exception exn in
   let err_kind = match force_kind with
@@ -246,6 +248,7 @@ let log_issue err_kind err_log loc (node_id, node_key) session ltr ?linters_def_
         err_class = eclass;
         visibility;
         linters_def_file;
+        doc_url;
       } in
       let err_key = {
         err_kind;
@@ -261,7 +264,7 @@ let log_issue err_kind err_log loc (node_id, node_key) session ltr ?linters_def_
       | _ -> added in
     let print_now () =
       let ex_name, desc, ml_loc_opt, _, _, _, _ = Exceptions.recognize_exception exn in
-      L.err "@\n%a@\n@?"
+      L.(debug Analysis Medium) "@\n%a@\n@?"
         (Exceptions.pp_err ~node_key loc err_kind ex_name desc ml_loc_opt) ();
       if err_kind <> Exceptions.Kerror then begin
         let warn_str =
@@ -273,7 +276,9 @@ let log_issue err_kind err_log loc (node_id, node_key) session ltr ?linters_def_
         let d = match err_kind with
           | Exceptions.Kerror -> L.d_error
           | Exceptions.Kwarning -> L.d_warning
-          | Exceptions.Kinfo | Exceptions.Kadvice -> L.d_info in
+          | Exceptions.Kinfo
+          | Exceptions.Kadvice
+          | Exceptions.Klike -> L.d_info in
         d warn_str; L.d_ln();
       end in
     if should_print_now then print_now ()
@@ -318,6 +323,7 @@ module Err_table = struct
     let map_warn_re = ref LocMap.empty in
     let map_info = ref LocMap.empty in
     let map_advice = ref LocMap.empty in
+    let map_likes = ref LocMap.empty in
     let add_err nslm key =
       let map = match key.in_footprint, key.err_kind with
         | true, Exceptions.Kerror -> map_err_fp
@@ -325,7 +331,8 @@ module Err_table = struct
         | true, Exceptions.Kwarning -> map_warn_fp
         | false, Exceptions.Kwarning -> map_warn_re
         | _, Exceptions.Kinfo -> map_info
-        | _, Exceptions.Kadvice -> map_advice in
+        | _, Exceptions.Kadvice -> map_advice
+        | _, Exceptions.Klike -> map_likes in
       try
         let err_list = LocMap.find nslm !map in
         map := LocMap.add nslm ((key.err_name, key.err_desc) :: err_list) !map

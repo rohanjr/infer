@@ -36,9 +36,6 @@ type pvar_kind =
 /** Names for program variables. */
 and t = {pv_hash: int, pv_name: Mangled.t, pv_kind: pvar_kind} [@@deriving compare];
 
-let compare_alpha pv1 pv2 =>
-  [%compare : (Mangled.t, pvar_kind)] (pv1.pv_name, pv1.pv_kind) (pv2.pv_name, pv2.pv_kind);
-
 let equal = [%compare.equal : t];
 
 let pp_translation_unit fmt =>
@@ -248,6 +245,10 @@ let is_static_local pv =>
 let is_this pvar => Mangled.equal (get_name pvar) (Mangled.from_string "this");
 
 
+/** Check if a pvar is the special "self" var */
+let is_self pvar => Mangled.equal (get_name pvar) (Mangled.from_string "self");
+
+
 /** Check if the pvar is a return var */
 let is_return pv => Mangled.equal (get_name pv) Ident.name_return;
 
@@ -379,12 +380,4 @@ let get_initializer_pname {pv_name, pv_kind} =>
       )
     )
   | _ => None
-  };
-
-module Set =
-  PrettyPrintable.MakePPCompareSet {
-    type nonrec t = t;
-    let compare = compare;
-    let compare_pp = compare_alpha;
-    let pp = pp Pp.text;
   };

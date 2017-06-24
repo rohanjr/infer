@@ -37,7 +37,7 @@ let unroll_type tenv (typ: Typ.t) (off: Sil.offset) =
       | None ->
           fail Fieldname.to_string fld
     )
-  | Tarray (typ', _), Off_index _ ->
+  | Tarray (typ', _, _), Off_index _ ->
       typ'
   | _, Off_index (Const (Cint i)) when IntLit.iszero i ->
       typ
@@ -114,7 +114,7 @@ let rec apply_offlist
             let deref_str = Localise.deref_str_uninitialized alloc_attribute_opt in
             let err_desc = Errdesc.explain_memory_access tenv deref_str p (State.get_loc ()) in
             let exn = (Exceptions.Uninitialized_value (err_desc, __POS__)) in
-            Reporting.log_warning pname exn;
+            Reporting.log_warning_deprecated pname exn;
             Sil.update_inst inst_curr inst
         | Sil.Ilookup -> (* a lookup does not change an inst unless it is inst_initial *)
             lookup_inst := Some inst_curr;
@@ -170,7 +170,9 @@ let rec apply_offlist
       pp_error();
       assert false
 
-  | (Sil.Off_index idx) :: offlist', Sil.Earray (len, esel, inst1), Typ.Tarray (t', len') -> (
+  | (Sil.Off_index idx) :: offlist',
+    Sil.Earray (len, esel, inst1),
+    Typ.Tarray (t', len', stride') -> (
       let nidx = Prop.exp_normalize_prop tenv p idx in
       match List.find ~f:(fun ese -> Prover.check_equal tenv p nidx (fst ese)) esel with
       | Some (idx_ese', se') ->
@@ -183,7 +185,7 @@ let rec apply_offlist
             then (idx_ese', res_se')
             else ese in
           let res_se = Sil.Earray (len, List.map ~f:replace_ese esel, inst1) in
-          let res_t = Typ.mk ~default:typ (Tarray (res_t', len')) in
+          let res_t = Typ.mk ~default:typ (Tarray (res_t', len', stride')) in
           (res_e', res_se, res_t, res_pred_insts_op')
       | None ->
           (* return a nondeterministic value if the index is not found after rearrangement *)
@@ -378,7 +380,7 @@ let check_inherently_dangerous_function caller_pname callee_pname =
     let exn =
       Exceptions.Inherently_dangerous_function
         (Localise.desc_inherently_dangerous_function callee_pname) in
-    Reporting.log_warning caller_pname exn
+    Reporting.log_warning_deprecated caller_pname exn
 
 let call_should_be_skipped callee_summary =
   (* check skip flag *)
@@ -413,14 +415,14 @@ let check_arith_norm_exp tenv pname exp prop =
   | Some (Attribute.Div0 div), prop' ->
       let desc = Errdesc.explain_divide_by_zero tenv div (State.get_node ()) (State.get_loc ()) in
       let exn = Exceptions.Divide_by_zero (desc, __POS__) in
-      Reporting.log_warning pname exn;
+      Reporting.log_warning_deprecated pname exn;
       Prop.exp_normalize_prop tenv prop exp, prop'
   | Some (Attribute.UminusUnsigned (e, typ)), prop' ->
       let desc =
         Errdesc.explain_unary_minus_applied_to_unsigned_expression tenv
           e typ (State.get_node ()) (State.get_loc ()) in
       let exn = Exceptions.Unary_minus_applied_to_unsigned_expression (desc, __POS__) in
-      Reporting.log_warning pname exn;
+      Reporting.log_warning_deprecated pname exn;
       Prop.exp_normalize_prop tenv prop exp, prop'
   | None, prop' -> Prop.exp_normalize_prop tenv prop exp, prop'
 
@@ -456,7 +458,7 @@ let check_already_dereferenced tenv pname cond prop =
           (Exp.Var id) (State.get_node ()) n (State.get_loc ()) in
       let exn =
         (Exceptions.Null_test_after_dereference (desc, __POS__)) in
-      Reporting.log_warning pname exn
+      Reporting.log_warning_deprecated pname exn
   | None -> ()
 
 (** Check whether symbolic execution de-allocated a stack variable or a constant string,
@@ -800,13 +802,6 @@ let normalize_params tenv pdesc prop actual_params =
   let prop, args = List.fold ~f:norm_arg ~init:(prop, []) actual_params in
   (prop, List.rev args)
 
-let do_error_checks tenv node_opt instr pname pdesc = match node_opt with
-  | Some node ->
-      if Config.curr_language_is Config.Java then
-        PrintfArgs.check_printf_args_ok tenv node instr pname pdesc
-  | None ->
-      ()
-
 let add_strexp_to_footprint tenv strexp abduced_pv typ prop =
   let abduced_lvar = Exp.Lvar abduced_pv in
   let lvar_pt_fpvar =
@@ -1032,7 +1027,7 @@ let rec sym_exec tenv current_pdesc _instr (prop_: Prop.normal Prop.t) path
       ret_typ_opt actual_args =
     let skip_res () =
       let exn = Exceptions.Skip_function (Localise.desc_skip_function callee_pname) in
-      Reporting.log_info current_pname exn;
+      Reporting.log_info_deprecated current_pname exn;
       L.d_strln
         ("Undefined function " ^ Typ.Procname.to_string callee_pname
          ^ ", returning undefined value.");
@@ -1079,9 +1074,9 @@ let rec sym_exec tenv current_pdesc _instr (prop_: Prop.normal Prop.t) path
               let desc = Errdesc.explain_condition_always_true_false tenv i cond node loc in
               let exn =
                 Exceptions.Condition_always_true_false (desc, not (IntLit.iszero i), __POS__) in
-              Reporting.log_warning current_pname exn
+              Reporting.log_warning_deprecated current_pname exn
           | _ -> () in
-      if not Config.report_runtime_exceptions then
+      if not Config.tracing then
         check_already_dereferenced tenv current_pname cond prop__;
       check_condition_always_true_false ();
       let n_cond, prop = check_arith_norm_exp tenv current_pname cond prop__ in
@@ -1113,7 +1108,6 @@ let rec sym_exec tenv current_pdesc _instr (prop_: Prop.normal Prop.t) path
                     proc_call resolved_summary (call_args prop_ callee_pname norm_args ret_id loc)
               end
           | Java callee_pname_java ->
-              do_error_checks tenv (Paths.Path.curr_node path) instr current_pname current_pdesc;
               let norm_prop, norm_args = normalize_params tenv current_pname prop_ actual_params in
               let url_handled_args =
                 call_constructor_url_update_args callee_pname norm_args in
@@ -1233,7 +1227,8 @@ let rec sym_exec tenv current_pdesc _instr (prop_: Prop.normal Prop.t) path
         | [], _ ->
             ret_old_path [prop_]
         | _ ->
-            L.err "Pvar %a appears on the LHS of >1 heap predicate!@." (Pvar.pp Pp.text) pvar;
+            L.internal_error "Pvar %a appears on the LHS of >1 heap predicate!@."
+              (Pvar.pp Pp.text) pvar;
             assert false
       end
   | Sil.Abstract _ ->
@@ -1395,7 +1390,7 @@ and check_untainted tenv exp taint_kind caller_pname callee_pname prop =
       let exn =
         Exceptions.Tainted_value_reaching_sensitive_function
           (err_desc, __POS__) in
-      Reporting.log_warning caller_pname exn;
+      Reporting.log_warning_deprecated caller_pname exn;
       Attribute.add_or_replace tenv prop (Apred (Auntaint taint_info, [exp]))
   | _ ->
       if !Config.footprint then
@@ -1582,7 +1577,7 @@ and proc_call
     && is_none (Specs.get_flag callee_summary ProcAttributes.proc_flag_ignore_return) then
       let err_desc = Localise.desc_return_value_ignored callee_pname loc in
       let exn = (Exceptions.Return_value_ignored (err_desc, __POS__)) in
-      Reporting.log_warning caller_pname exn in
+      Reporting.log_warning_deprecated caller_pname exn in
   check_inherently_dangerous_function caller_pname callee_pname;
   begin
     let formal_types = List.map ~f:snd (Specs.get_formals callee_summary) in

@@ -104,6 +104,18 @@ module NodesHtml : sig
 end = struct
   let log_files = Hashtbl.create 11
 
+  let pp_node_link fmt node =
+    Io_infer.Html.pp_node_link
+      [".."]
+      (Procdesc.Node.get_proc_name node)
+      ~description:""
+      ~preds:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_preds node) :> int list)
+      ~succs:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_succs node) :> int list)
+      ~exn:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_exn node) :> int list)
+      ~isvisited:(is_visited node)
+      ~isproof:false
+      fmt (Procdesc.Node.get_id node :> int)
+
   let start_node nodeid loc proc_name preds succs exns source =
     let node_fname = Io_infer.Html.node_filename proc_name nodeid in
     let modified = Io_infer.Html.modified_during_analysis source ["nodes"; node_fname] in
@@ -121,46 +133,16 @@ end = struct
       (F.fprintf fmt "<center><h1>Cfg Node %a</h1></center>"
          (Io_infer.Html.pp_line_link source ~text: (Some (string_of_int nodeid)) [".."])
          loc.Location.line;
-       F.fprintf fmt "PROC: %a LINE:%a\n"
+       F.fprintf fmt "PROC: %a LINE:%a@\n"
          (Io_infer.Html.pp_proc_link [".."] proc_name)
          (Escape.escape_xml (Typ.Procname.to_string proc_name))
          (Io_infer.Html.pp_line_link source [".."]) loc.Location.line;
        F.fprintf fmt "<br>PREDS:@\n";
-       List.iter ~f:(fun node ->
-           Io_infer.Html.pp_node_link
-             [".."]
-             (Procdesc.Node.get_proc_name node)
-             ~description:""
-             ~preds:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_preds node) :> int list)
-             ~succs:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_succs node) :> int list)
-             ~exn:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_exn node) :> int list)
-             ~isvisited:(is_visited node)
-             ~isproof:false
-             fmt (Procdesc.Node.get_id node :> int)) preds;
+       List.iter ~f:(pp_node_link fmt) preds;
        F.fprintf fmt "<br>SUCCS: @\n";
-       List.iter ~f:(fun node ->
-           Io_infer.Html.pp_node_link
-             [".."]
-             (Procdesc.Node.get_proc_name node)
-             ~description:""
-             ~preds:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_preds node) :> int list)
-             ~succs:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_succs node) :> int list)
-             ~exn:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_exn node) :> int list)
-             ~isvisited:(is_visited node)
-             ~isproof:false
-             fmt (Procdesc.Node.get_id node :> int)) succs;
+       List.iter ~f:(pp_node_link fmt) succs;
        F.fprintf fmt "<br>EXN: @\n";
-       List.iter ~f:(fun node ->
-           Io_infer.Html.pp_node_link
-             [".."]
-             (Procdesc.Node.get_proc_name node)
-             ~description:""
-             ~preds:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_preds node) :> int list)
-             ~succs:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_succs node) :> int list)
-             ~exn:(List.map ~f:Procdesc.Node.get_id (Procdesc.Node.get_exn node) :> int list)
-             ~isvisited:(is_visited node)
-             ~isproof:false
-             fmt (Procdesc.Node.get_id node :> int)) exns;
+       List.iter ~f:(pp_node_link fmt) exns;
        F.fprintf fmt "<br>@\n";
        F.pp_print_flush fmt ();
        true
@@ -388,7 +370,7 @@ let start_session node (loc: Location.t) proc_name session source =
        Io_infer.Html.pp_end_color ());
   F.fprintf !curr_html_formatter "%a%a"
     Io_infer.Html.pp_hline ()
-    (Io_infer.Html.pp_session_link source ~with_name: true [".."])
+    (Io_infer.Html.pp_session_link source ~with_name: true [".."]  ~proc_name)
     ((node_id :> int), session, loc.Location.line);
   F.fprintf !curr_html_formatter "<LISTING>%a"
     Io_infer.Html.pp_start_color Pp.Black
@@ -511,7 +493,7 @@ let write_html_file linereader filename procs =
       (DB.Results_dir.Abs_source_dir filename)
       [".."; fname_encoding] in
   let pp_prelude () =
-    F.fprintf fmt "<center><h1>File %a </h1></center>\n<table class=\"code\">\n"
+    F.fprintf fmt "<center><h1>File %a </h1></center>@\n<table class=\"code\">@\n"
       SourceFile.pp filename in
   let print_one_line proof_cover table_nodes_at_linenum table_err_per_line line_number =
     let line_html =
@@ -574,7 +556,7 @@ let write_html_file linereader filename procs =
       ~f:(fun err_string ->
           F.fprintf fmt "%s" (create_err_message err_string))
       errors_at_linenum;
-    F.fprintf fmt "%s" "</td></tr>\n" in
+    F.fprintf fmt "</td></tr>@\n" in
 
   pp_prelude ();
   let global_err_log = Errlog.empty () in
@@ -590,7 +572,7 @@ let write_html_file linereader filename procs =
       print_one_line proof_cover table_nodes_at_linenum table_err_per_line !linenum
     done
   with End_of_file ->
-    (F.fprintf fmt "%s" "</table>\n";
+    (F.fprintf fmt "</table>@\n";
      Errlog.pp_html filename [fname_encoding] fmt global_err_log;
      Io_infer.Html.close (fd, fmt))
 

@@ -23,7 +23,7 @@ exception TemplatedCodeException of Clang_ast_t.stmt
 let extract_item_from_singleton l warning_string failure_val =
   match l with
   | [item] -> item
-  | _ -> Logging.err_debug "%s" warning_string; failure_val
+  | _ -> L.(debug Capture Medium) "%s" warning_string; failure_val
 
 let dummy_exp = (Exp.minus_one, Typ.mk (Tint Typ.IInt))
 
@@ -59,7 +59,7 @@ struct
 
   let create_prune_node branch e_cond instrs_cond loc ik context =
     let (e_cond', _) = extract_exp_from_list e_cond
-        "\nWARNING: Missing expression for Conditional operator. Need to be fixed" in
+        "@\nWARNING: Missing expression for Conditional operator. Need to be fixed" in
     let e_cond'' =
       if branch then
         Exp.BinOp(Binop.Ne, e_cond', Exp.zero)
@@ -214,11 +214,11 @@ struct
   let try_claim_priority_node trans_state stmt_info =
     match trans_state.priority with
     | Free ->
-        Logging.out_debug "Priority is free. Locking priority node in %d\n@."
+        L.(debug Capture Verbose) "Priority is free. Locking priority node in %d@\n@."
           stmt_info.Clang_ast_t.si_pointer;
         { trans_state with priority = Busy stmt_info.Clang_ast_t.si_pointer }
     | _ ->
-        Logging.out_debug "Priority busy in %d. No claim possible\n@."
+        L.(debug Capture Verbose) "Priority busy in %d. No claim possible@\n@."
           stmt_info.Clang_ast_t.si_pointer;
         trans_state
 
@@ -438,9 +438,12 @@ let cast_operation trans_state cast_kind exps cast_typ sil_loc is_objc_bridged =
       (* So we assign the LValue to a temp and we pass it to the parent.*)
       let instrs, deref_exp = dereference_var_sil (exp, cast_typ) sil_loc in
       instrs, (deref_exp, cast_typ)
+  | `NullToPointer ->
+      if Exp.is_zero exp then ([], (Exp.null, cast_typ))
+      else ([], (exp, cast_typ))
   | _ ->
-      Logging.err_debug
-        "\nWARNING: Missing translation for Cast Kind %s. The construct has been ignored...\n"
+      L.(debug Capture Verbose)
+        "@\nWARNING: Missing translation for Cast Kind %s. The construct has been ignored...@\n"
         (Clang_ast_j.string_of_cast_kind cast_kind);
       ([], (exp, cast_typ))
 
@@ -507,7 +510,8 @@ let cxx_method_builtin_trans trans_state loc params_trans_res pname =
     None
 
 let define_condition_side_effects e_cond instrs_cond sil_loc =
-  let (e', typ) = extract_exp_from_list e_cond "\nWARNING: Missing expression in IfStmt. Need to be fixed\n" in
+  let (e', typ) = extract_exp_from_list e_cond
+      "@\nWARNING: Missing expression in IfStmt. Need to be fixed@\n" in
   match e' with
   | Exp.Lvar pvar ->
       let id = Ident.create_fresh Ident.knormal in
@@ -569,7 +573,7 @@ let rec get_type_from_exp_stmt stmt =
       get_type_from_exp_stmt (extract_stmt_from_singleton stmt_list "WARNING: We expect only one stmt.")
   | DeclRefExpr(_, _, _, info) -> do_decl_ref_exp info
   | _ ->
-      Logging.err_debug "Failing with: %s@\n%!" (Clang_ast_j.string_of_stmt stmt);
+      L.internal_error "Failing with: %s@\n%!" (Clang_ast_j.string_of_stmt stmt);
       assert false
 
 module Self =
@@ -724,7 +728,7 @@ let var_or_zero_in_init_list tenv e typ ~return_zero:return_zero =
         | None ->
             assert false
       )
-    | Tarray (arrtyp, Some n) ->
+    | Tarray (arrtyp, Some n, _) ->
         let size = IntLit.to_int n in
         let indices = list_range 0 (size - 1) in
         let index_constants =
@@ -738,7 +742,7 @@ let var_or_zero_in_init_list tenv e typ ~return_zero:return_zero =
     | Tint _ | Tfloat _  | Tptr _ ->
         let exp = if return_zero then Sil.zero_value_of_numerical_type typ else e in
         [ [(exp, typ)] ]
-    | Tfun _ | Tvoid | Tarray _ -> assert false in
+    | Tfun _ | Tvoid | Tarray _ | TVar _ -> assert false in
   List.concat (var_or_zero_in_init_list' e typ String.Set.empty)
 
 (*
@@ -746,7 +750,7 @@ let var_or_zero_in_init_list tenv e typ ~return_zero:return_zero =
 let extract_item_from_option op warning_string =
   match op with
   | Some item -> item
-  | _ -> Logging.err_debug warning_string; assert false
+  | _ -> L.(debug Capture Verbose) warning_string; assert false
 
 let extract_id_from_singleton id_list warning_string =
   extract_item_from_singleton id_list warning_string (dummy_id ())

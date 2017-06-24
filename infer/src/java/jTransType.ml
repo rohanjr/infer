@@ -13,6 +13,8 @@ open! IStd
 open Javalib_pack
 open Sawja_pack
 
+module L = Logging
+
 (** Type transformations between Javalib datatypes and sil datatypes *)
 
 exception Type_tranlsation_error of string
@@ -69,7 +71,7 @@ let rec get_named_type vt : Typ.t =
         match ot with
         | JBasics.TArray vt ->
             let content_type = get_named_type vt in
-            Typ.mk (Tptr (Typ.mk (Tarray (content_type, None)), Typ.Pk_pointer))
+            Typ.mk (Tptr (Typ.mk (Tarray (content_type, None, None)), Typ.Pk_pointer))
         | JBasics.TClass cn ->
             Typ.mk (Tptr (Typ.mk (Tstruct (typename_of_classname cn)), Typ.Pk_pointer))
       end
@@ -84,7 +86,7 @@ let extract_cn_type_np typ =
 let rec create_array_type typ dim =
   if dim > 0 then
     let content_typ = create_array_type typ (dim - 1) in
-    Typ.mk (Tptr(Typ.mk (Tarray (content_typ, None)), Typ.Pk_pointer))
+    Typ.mk (Tptr(Typ.mk (Tarray (content_typ, None, None)), Typ.Pk_pointer))
   else typ
 
 let extract_cn_no_obj typ =
@@ -249,7 +251,8 @@ let collect_models_class_fields classpath_field_map cn cf fields =
     if Typ.equal classpath_ft field_type then fields
     else
       (* TODO (#6711750): fix type equality for arrays before failing here *)
-      let () = Logging.stderr "Found inconsistent types for %s\n\tclasspath: %a\n\tmodels: %a\n@."
+      let () = L.(debug Capture Quiet)
+          "Found inconsistent types for %s@\n\tclasspath: %a@\n\tmodels: %a@\n@."
           (Fieldname.to_string field_name)
           (Typ.pp_full Pp.text) classpath_ft
           (Typ.pp_full Pp.text) field_type in fields
@@ -364,7 +367,7 @@ let rec object_type program tenv ot =
   match ot with
   | JBasics.TClass cn -> get_class_type program tenv cn
   | JBasics.TArray at ->
-      Typ.mk (Tptr (Typ.mk (Tarray (value_type program tenv at, None)), Typ.Pk_pointer))
+      Typ.mk (Tptr (Typ.mk (Tarray (value_type program tenv at, None, None)), Typ.Pk_pointer))
 
 (** translate a value type *)
 and value_type program tenv vt =
@@ -410,7 +413,7 @@ let get_var_type context var =
 
 let extract_array_type typ =
   match typ.Typ.desc with
-  | Typ.Tptr({desc=Tarray (vtyp, _)}, Typ.Pk_pointer) -> vtyp
+  | Typ.Tptr({desc=Tarray (vtyp, _, _)}, Typ.Pk_pointer) -> vtyp
   | _ -> typ
 
 

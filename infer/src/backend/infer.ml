@@ -132,37 +132,48 @@ let remove_results_dir () =
 let create_results_dir () =
   Unix.mkdir_p (Config.results_dir ^/ Config.attributes_dir_name) ;
   Unix.mkdir_p (Config.results_dir ^/ Config.captured_dir_name) ;
-  Unix.mkdir_p (Config.results_dir ^/ Config.specs_dir_name)
+  Unix.mkdir_p (Config.results_dir ^/ Config.specs_dir_name);
+  L.setup_log_file ()
 
+(* Clean up the results dir to select only what's relevant to go in the Buck cache. In particular,
+   get rid of non-deterministic outputs.*)
 let clean_results_dir () =
-  let dirs = ["classnames"; "filelists"; "multicore"; "sources"; "log";
-              "attributes"; "backend_stats"; "reporting_stats"; "frontend_stats"] in
-  let suffixes = [".cfg"; ".cg"; ".txt"; ".csv"; ".json"] in
+  (* In Buck flavors mode we keep all capture data, but in Java mode we keep only the tenv *)
+  let should_delete_dir =
+    let dirs_to_delete =
+      "backend_stats" :: "classnames" :: "filelists" :: "frontend_stats" :: "multicore" ::
+      "reporting_stats" :: "sources" ::
+      if Config.flavors then []
+      else ["attributes"] in
+    List.mem ~equal:String.equal dirs_to_delete in
+  let should_delete_file =
+    let suffixes_to_delete =
+      ".txt" :: ".csv" :: ".json" ::
+      if Config.flavors then []
+      else [ ".cfg"; ".cg" ] in
+    fun name ->
+      (* Keep the JSON report *)
+      not (String.equal (Filename.basename name) "report.json")
+      && List.exists ~f:(Filename.check_suffix name) suffixes_to_delete in
   let rec clean name =
+    let rec cleandir dir = match Unix.readdir dir with
+      | entry ->
+          if should_delete_dir entry then (
+            rmtree (name ^/ entry)
+          ) else if not (String.equal entry Filename.current_dir_name
+                         || String.equal entry Filename.parent_dir_name) then (
+            clean (name ^/ entry)
+          );
+          cleandir dir (* next entry *)
+      | exception End_of_file ->
+          Unix.closedir dir in
     match Unix.opendir name with
-    | dir -> (
-        let rec cleandir dir =
-          match Unix.readdir dir with
-          | entry ->
-              if (List.exists ~f:(String.equal entry) dirs) then (
-                rmtree (name ^/ entry)
-              ) else if not (String.equal entry Filename.current_dir_name
-                             || String.equal entry Filename.parent_dir_name) then (
-                clean (name ^/ entry)
-              );
-              cleandir dir
-          | exception End_of_file ->
-              Unix.closedir dir in
+    | dir ->
         cleandir dir
-      )
-    | exception Unix.Unix_error (Unix.ENOTDIR, _, _)
-      when String.equal (Filename.basename name) "report.json" ->
-        (* Keep the JSON report *)
-        ()
     | exception Unix.Unix_error (Unix.ENOTDIR, _, _) ->
-        if not (String.equal (Filename.basename name) "report.json")
-        && List.exists ~f:(Filename.check_suffix name) suffixes then
-          Unix.unlink name
+        if should_delete_file name then
+          Unix.unlink name;
+        ()
     | exception Unix.Unix_error (Unix.ENOENT, _, _) ->
         () in
   clean Config.results_dir
@@ -174,9 +185,9 @@ let check_captured_empty driver_mode =
   if Utils.dir_is_empty Config.captured_dir && not Config.merge then ((
       match clean_command_opt with
       | Some clean_command ->
-          Logging.stderr "@\nNothing to compile. Try running `%s` first.@." clean_command
+          L.user_warning "@\nNothing to compile. Try running `%s` first.@." clean_command
       | None ->
-          Logging.stderr "@\nNothing to compile. Try cleaning the build first.@."
+          L.user_warning "@\nNothing to compile. Try cleaning the build first.@."
     );
      true
     ) else
@@ -186,7 +197,6 @@ let register_perf_stats_report () =
   let stats_dir = Filename.concat Config.results_dir Config.backend_stats_dir_name in
   let stats_base = Config.perf_stats_prefix ^ ".json" in
   let stats_file = Filename.concat stats_dir stats_base in
-  Unix.mkdir_p stats_dir;
   PerfStats.register_report_at_exit stats_file
 
 let reset_duplicates_file () =
@@ -219,11 +229,10 @@ let check_xcpretty () =
   match Unix.system "xcpretty --version" with
   | Ok () -> ()
   | Error _ ->
-      L.stderr
-        "@.xcpretty not found in the path. Please, install xcpretty \
+      L.user_error
+        "@\nxcpretty not found in the path. Please consider installing xcpretty \
          for a more robust integration with xcodebuild. Otherwise use the option \
-         --no-xcpretty.@.@.";
-      exit 1
+         --no-xcpretty.@\n@."
 
 let capture_with_compilation_database db_files =
   let root = Unix.getcwd () in
@@ -238,26 +247,26 @@ let capture = function
   | Analyze ->
       ()
   | BuckCompilationDB (prog, args) ->
-      L.stdout "Capturing using Buck's compilation database...@.";
+      L.progress "Capturing using Buck's compilation database...@.";
       let json_cdb = CaptureCompilationDatabase.get_compilation_database_files_buck ~prog ~args in
       capture_with_compilation_database json_cdb
   | BuckGenrule path ->
-      L.stdout "Capturing for Buck genrule compatibility...@.";
+      L.progress "Capturing for Buck genrule compatibility...@.";
       JMain.from_arguments path
   | Clang (compiler, prog, args) ->
-      L.stdout "Capturing in make/cc mode...@.";
+      L.progress "Capturing in make/cc mode...@.";
       Clang.capture compiler ~prog ~args
   | ClangCompilationDB db_files ->
-      L.stdout "Capturing using compilation database...@.";
+      L.progress "Capturing using compilation database...@.";
       capture_with_compilation_database db_files
   | Javac (compiler, prog, args) ->
-      L.stdout "Capturing in javac mode...@.";
+      L.progress "Capturing in javac mode...@.";
       Javac.capture compiler ~prog ~args
   | Maven (prog, args) ->
-      L.stdout "Capturing in maven mode...@.";
+      L.progress "Capturing in maven mode...@.";
       Maven.capture ~prog ~args
   | PythonCapture (build_system, build_cmd) ->
-      L.stdout "Capturing in %s mode...@." (string_of_build_system build_system);
+      L.progress "Capturing in %s mode...@." (string_of_build_system build_system);
       let in_buck_mode = equal_build_system build_system BBuck in
       let infer_py = Config.lib_dir ^/ "python" ^/ "infer.py" in
       let args =
@@ -270,8 +279,6 @@ let capture = function
            | _ -> []) @
           (if not Config.create_harness then [] else
              ["--android-harness"]) @
-          (if not Config.buck then [] else
-             ["--buck"]) @
           (match Config.java_jar_compiler with None -> [] | Some p ->
               ["--java-jar-compiler"; p]) @
           (match List.rev Config.buck_build_args with
@@ -299,6 +306,10 @@ let capture = function
               ["--xcode-developer-dir"; d]) @
           "--" ::
           if in_buck_mode && Config.flavors then
+            (* let children infer processes know that they are inside Buck *)
+            let infer_args_with_buck = String.concat ~sep:(String.of_char CLOpt.env_var_sep)
+                (Option.to_list (Sys.getenv CLOpt.args_env_var) @ ["--buck"]) in
+            Unix.putenv ~key:CLOpt.args_env_var ~data:infer_args_with_buck;
             Buck.add_flavors_to_buck_command build_cmd
           else build_cmd
         ) in
@@ -312,7 +323,7 @@ let capture = function
               ()
         )
   | XcodeXcpretty (prog, args) ->
-      L.stdout "Capturing using xcodebuild and xcpretty...@.";
+      L.progress "Capturing using xcodebuild and xcpretty...@.";
       check_xcpretty ();
       let json_cdb =
         CaptureCompilationDatabase.get_compilation_database_files_xcodebuild ~prog ~args in
@@ -344,9 +355,11 @@ let report () =
   let report_json = Some (Config.results_dir ^/ "report.json") in
   InferPrint.main ~report_csv ~report_json ;
   (* Post-process the report according to the user config. By default, calls report.py to create a
-     human-readable report. *)
-  match Config.buck_cache_mode, Config.report_hook with
-  | true, _ (* do not bother calling the report hook when called from within Buck *)
+     human-readable report.
+
+     Do not bother calling the report hook when called from within Buck or in quiet mode. *)
+  match Config.quiet || Config.buck_cache_mode, Config.report_hook with
+  | true, _
   | false, None ->
       ()
   | false, Some prog ->
@@ -361,7 +374,8 @@ let report () =
           "--results-dir"; Config.results_dir
         ] in
       if is_error (Unix.waitpid (Unix.fork_exec ~prog ~args:(prog :: args) ())) then
-        L.stderr "** Error running the reporting script:@\n**   %s %s@\n** See error above@."
+        L.external_error
+          "** Error running the reporting script:@\n**   %s %s@\n** See error above@."
           prog (String.concat ~sep:" " args)
 
 let analyze driver_mode =
@@ -373,37 +387,40 @@ let analyze driver_mode =
     | _ when Config.maven ->
         (* Called from Maven, only do capture. *)
         false, false
-    | _, (Capture | Compile) ->
+    | _, (CaptureOnly | CompileOnly) ->
         false, false
-    | _, (Infer | Eradicate | Checkers | Tracing | Crashcontext | Quandary | Siof | Threadsafety
-         | Bufferoverrun) ->
+    | _, (BiAbduction | Checkers | Crashcontext | Eradicate) ->
         true, true
     | _, Linters ->
         false, true in
   if (should_analyze || should_report) &&
      (((Sys.file_exists Config.captured_dir) <> `Yes) ||
       check_captured_empty driver_mode) then (
-    L.stderr "There was nothing to analyze.@\n@." ;
+    L.user_error "There was nothing to analyze.@\n@." ;
   ) else if should_analyze then
     execute_analyze ();
-  if should_report then report ()
+  if should_report && Config.report then report ()
 
 (** as the Config.fail_on_bug flag mandates, exit with error when an issue is reported *)
 let fail_on_issue_epilogue () =
-  let issues_json = DB.Results_dir.(path_to_filename Abs_root ["report.json"]) in
-  match Utils.read_file (DB.filename_to_string issues_json) with
-  | Some lines ->
+  let issues_json = DB.Results_dir.(path_to_filename Abs_root ["report.json"])
+                    |> DB.filename_to_string in
+  match Utils.read_file issues_json with
+  | Ok lines ->
       let issues = Jsonbug_j.report_of_string @@ String.concat ~sep:"" lines in
       if issues <> [] then exit Config.fail_on_issue_exit_code
-  | None -> ()
+  | Error error ->
+      L.internal_error "Failed to read report file '%s': %s@." issues_json error ;
+      ()
 
 let log_infer_args driver_mode =
-  L.out "INFER_ARGS = %s@\n" (Option.value (Sys.getenv CLOpt.args_env_var) ~default:"<not found>");
-  List.iter ~f:(L.out "anon arg: %s@\n") Config.anon_args;
-  List.iter ~f:(L.out "rest arg: %s@\n") Config.rest;
-  L.out "Project root = %s@\n" Config.project_root;
-  L.out "CWD = %s@\n" (Sys.getcwd ());
-  L.out "Driver mode:@\n%a@." pp_driver_mode driver_mode
+  L.environment_info "INFER_ARGS = %s@\n"
+    (Option.value (Sys.getenv CLOpt.args_env_var) ~default:"<not found>");
+  List.iter ~f:(L.environment_info "anon arg: %s@\n") Config.anon_args;
+  List.iter ~f:(L.environment_info "rest arg: %s@\n") Config.rest;
+  L.environment_info "Project root = %s@\n" Config.project_root;
+  L.environment_info "CWD = %s@\n" (Sys.getcwd ());
+  L.environment_info "Driver mode:@\n%a@." pp_driver_mode driver_mode
 
 let assert_supported_mode required_analyzer requested_mode_string =
   let analyzer_enabled = match required_analyzer with
@@ -436,8 +453,13 @@ let assert_supported_build_system build_system = match build_system with
           (`Clang, "buck with flavors")
         else if Option.is_some Config.buck_compilation_database then
           (`Clang, "buck compilation database")
-        else
-          (`Java, string_of_build_system build_system) in
+        else (
+          if Config.reactive_mode then
+            L.user_error
+              "WARNING: The reactive analysis mode is not compatible with the Buck integration for \
+               Java";
+          (`Java, string_of_build_system build_system)
+        ) in
       assert_supported_mode analyzer build_string
   | BAnalyze ->
       ()
@@ -455,6 +477,9 @@ let driver_mode_of_build_cmd build_cmd =
       assert_supported_build_system build_system;
       match build_system_of_exe_name (Filename.basename prog) with
       | BAnalyze ->
+          CLOpt.warnf
+            "WARNING: `infer -- analyze` is deprecated; \
+             use the `infer analyze` subcommand instead@.";
           Analyze
       | BBuck when Option.is_some Config.buck_compilation_database ->
           BuckCompilationDB (prog, List.append args (List.rev Config.buck_build_args))
@@ -493,10 +518,7 @@ let infer_mode () =
           Config.(buck || continue_capture || maven || reactive_mode)) then
     remove_results_dir () ;
   create_results_dir () ;
-  (* re-set log files, as default files were in results_dir removed above *)
-  if not Config.buck_cache_mode then L.set_log_file_identifier CLOpt.(Infer Driver) None;
-  if Config.print_builtins then Builtin.print_and_exit () ;
-  if CLOpt.is_originator then L.do_out "%s@\n" Config.version_string ;
+  if CLOpt.is_originator then L.environment_info "%a@\n" Config.pp_version () ;
   if Config.debug_mode || Config.stats_mode then log_infer_args driver_mode ;
   if Config.dump_duplicate_symbols then reset_duplicates_file ();
   (* infer might be called from a Makefile and itself uses `make` to run the analysis in parallel,
@@ -504,9 +526,7 @@ let infer_mode () =
      anyway, pretend that we are not called from another make to prevent make falling back to a
      mono-threaded execution. *)
   Unix.unsetenv "MAKEFLAGS";
-  if not Config.buck_cache_mode then register_perf_stats_report () ;
-  if Config.buck_cache_mode && Config.reactive_mode then
-    failwith "The reactive analysis mode is not compatible with the Buck integration for Java";
+  register_perf_stats_report () ;
   if not Config.buck_cache_mode then touch_start_file_unless_continue () ;
   capture driver_mode ;
   analyze driver_mode ;
@@ -518,30 +538,79 @@ let infer_mode () =
     if Config.fail_on_bug then
       fail_on_issue_epilogue () ;
   );
-  if Config.buck_cache_mode then
-    clean_results_dir ()
+  if Config.buck_cache_mode then clean_results_dir ();
+  ()
 
 let differential_mode () =
-  let arg_or_fail arg_name arg_opt =
-    match arg_opt with
-    | Some arg -> arg
-    | None -> failwithf "Expected '%s' argument not found" arg_name in
-  let load_report filename : Jsonbug_t.report =
-    Jsonbug_j.report_of_string (In_channel.read_all filename) in
-  let current_report = load_report (arg_or_fail "report-current" Config.report_current) in
-  let previous_report = load_report (arg_or_fail "report-previous" Config.report_previous) in
-  let file_renamings = match Config.file_renamings with
-    | Some f -> DifferentialFilters.FileRenamings.from_json_file f
-    | None -> DifferentialFilters.FileRenamings.empty in
-  let diff = DifferentialFilters.do_filter
-      (Differential.of_reports ~current_report ~previous_report)
-      file_renamings
-      ~skip_duplicated_types:Config.skip_duplicated_types in
+  (* at least one report must be passed in input to compute differential *)
+  (match Config.report_current, Config.report_previous with
+   | None, None ->
+       failwith "Expected at least one argument among 'report-current' and 'report-previous'@\n"
+   | _ -> ());
+  let load_report filename_opt : Jsonbug_t.report =
+    let empty_report = [] in
+    Option.value_map
+      ~f:(fun filename -> Jsonbug_j.report_of_string (In_channel.read_all filename))
+      ~default:empty_report filename_opt in
+  let current_report = load_report Config.report_current in
+  let previous_report = load_report Config.report_previous in
+  let diff =
+    let unfiltered_diff = Differential.of_reports ~current_report ~previous_report in
+    if Config.filtering then
+      let file_renamings = match Config.file_renamings with
+        | Some f -> DifferentialFilters.FileRenamings.from_json_file f
+        | None -> DifferentialFilters.FileRenamings.empty in
+      let interesting_paths = Option.map ~f:(fun fname ->
+          List.map ~f:(SourceFile.create ~warn_on_error:false) (In_channel.read_lines fname))
+          Config.differential_filter_files in
+      DifferentialFilters.do_filter
+        unfiltered_diff
+        file_renamings
+        ~skip_duplicated_types:Config.skip_duplicated_types
+        ~interesting_paths
+    else unfiltered_diff in
   let out_path = Config.results_dir ^/ "differential" in
   Unix.mkdir_p out_path;
   Differential.to_files diff out_path
 
+let assert_results_dir advice =
+  if Sys.file_exists Config.results_dir <> `Yes then (
+    L.user_error "ERROR: results directory %s does not exist@\nERROR: %s@."
+      Config.results_dir advice;
+    exit 1
+  );
+  L.setup_log_file ()
+
+let setup_results_dir () =
+  match Config.command with
+  | Analyze -> assert_results_dir "have you run capture before?"
+  | Clang | Report | ReportDiff -> create_results_dir ()
+  | Capture | Compile | Run  ->
+      (* These have their own logic depending on the rest of the command line. It particular they
+         might delete the previous results directory. Let them do their thing. *)
+      ()
+
 let () =
-  match Config.final_parse_action with
-  | Differential -> differential_mode ()
-  | _ -> infer_mode ()
+  if Config.print_builtins then Builtin.print_and_exit ();
+  setup_results_dir ();
+  if Config.debug_mode then
+    L.progress "Logs in %s@." (Config.results_dir ^/ Config.log_file);
+  match Config.command with
+  | Analyze ->
+      let pp_cluster_opt fmt = function
+        | None -> F.fprintf fmt "(no cluster)"
+        | Some cluster -> F.fprintf fmt "of cluster %s" (Filename.basename cluster) in
+      L.environment_info "Starting analysis %a" pp_cluster_opt Config.cluster_cmdline;
+      InferAnalyze.register_perf_stats_report ();
+      analyze Analyze
+  | Clang ->
+      let prog, args = match Array.to_list Sys.argv with
+        | prog::args -> prog, args
+        | [] -> assert false (* Sys.argv is never empty *) in
+      ClangWrapper.exe ~prog ~args
+  | Report ->
+      InferPrint.main_from_config ()
+  | ReportDiff ->
+      differential_mode ()
+  | Capture | Compile | Run  ->
+      infer_mode ()

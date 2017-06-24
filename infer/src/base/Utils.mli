@@ -21,8 +21,8 @@ val string_crc_hex32 : string -> string
 (** copy a source file, return the number of lines, or None in case of error *)
 val copy_file : string -> string -> int option
 
-(** read a source file and return a list of lines, or None in case of error *)
-val read_file : string -> string list option
+(** read a source file and return a list of lines *)
+val read_file : string -> (string list, string) Result.t
 
 (** Convert a filename to an absolute one if it is relative, and normalize "." and ".." *)
 val filename_to_absolute : root:string -> string -> string
@@ -71,9 +71,11 @@ val shell_escape_command : string list -> string
 (** create a directory if it does not exist already *)
 val create_dir : string -> unit
 
-(** [realpath path] returns path with all symbolic links resolved. It caches results of previous
-    calls to avoid expensive system calls *)
-val realpath : string -> string
+(** [realpath warn_on_error path] returns path with all symbolic links resolved.
+    It caches results of previous calls to avoid expensive system calls.
+    WARNING: If warn_on_error is false, no warning will be shown whenever an error occurs for
+    the given path (e.g. if it does not exist). *)
+val realpath : ?warn_on_error:bool -> string -> string
 
 (** wraps a function expecting 2 arguments in another that temporarily redirects stderr to /dev/null
     for the duration of the function call *)
@@ -84,27 +86,6 @@ val suppress_stderr2 : ('a -> 'b -> 'c) -> 'a -> 'b -> 'c
     The versions are strings of the shape "n.m.t", the order is lexicographic. *)
 val compare_versions : string -> string -> int
 
-(** Like List.iter but operates in parallel up to a number of jobs *)
-val iter_parallel : f:('a -> unit) -> ?jobs:int -> 'a list -> unit
-
-(** Like List.iteri but operates in parallel up to a number of jobs *)
-val iteri_parallel : f:(int -> 'a -> unit) -> ?jobs:int -> 'a list -> unit
-
-(** Pool of processes to execute in parallel up to a number of jobs. *)
-module ProcessPool : sig
-  type t
-
-  (** Create a new pool of processes *)
-  val create : jobs:int -> t
-
-  (** Start a new child process in the pool.
-      If all the jobs are taken, wait until one is free. *)
-  val start_child : f:('a -> unit) -> pool:t -> 'a -> unit
-
-  (** Wait until all the currently executing processes terminate *)
-  val wait_all : t -> unit
-end
-
-(** Register a function to run when the program exits or is interrupted. Registered functions are
-    run in the reverse order in which they were registered. *)
-val register_epilogue : (unit -> unit) -> string -> unit
+(** Lock file passed as argument and write into it using [f]. If [delete] then the file is unlinked
+    once this is done. *)
+val write_file_with_locking : ?delete:bool -> f:(out_channel -> unit) -> string -> unit

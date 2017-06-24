@@ -10,6 +10,8 @@
 open! IStd
 open Ctl_parser_types
 
+module L = Logging
+
 (* This module defines a language to define checkers. These checkers
    are intepreted over the AST of the program. A checker is defined by a
    CTL formula which express a condition saying when the checker should
@@ -20,6 +22,7 @@ type transitions =
   | Body (** decl to stmt *)
   | InitExpr (** decl to stmt *)
   | Super (** decl to decl *)
+  | Parameters (** decl to decl *)
   | Cond
   | PointerToDecl (** stmt to decl *)
 
@@ -36,13 +39,13 @@ type t = (* A ctl formula *)
   | Or of t * t
   | Implies of t * t
   | InNode of ALVar.alexp list * t
-  | AX of t
+  | AX of transitions option * t
   | EX of transitions option * t
-  | AF of t
+  | AF of transitions option * t
   | EF of transitions option * t
-  | AG of t
+  | AG of transitions option * t
   | EG of transitions option * t
-  | AU of t * t
+  | AU of transitions option * t * t
   | EU of transitions option * t * t
   | EH of ALVar.alexp list * t
   | ET of ALVar.alexp list * transitions option * t
@@ -51,7 +54,9 @@ type t = (* A ctl formula *)
 let has_transition phi = match phi with
   | True | False | Atomic _ | Not _ | And (_, _)
   | Or (_, _) | Implies (_, _) | InNode (_, _)
-  | AX _ | AF _ | AG _ | AU (_, _) | EH (_, _) -> false
+  | EH (_, _) -> false
+  | AX (trans_opt, _) | AF (trans_opt, _)
+  | AG (trans_opt, _) | AU (trans_opt, _, _)
   | EX (trans_opt, _) | EF (trans_opt, _)
   | EG (trans_opt, _) | EU (trans_opt, _, _)
   | ET (_, trans_opt, _) | ETX (_, trans_opt, _) -> Option.is_some trans_opt
@@ -72,10 +77,12 @@ let has_transition phi = match phi with
    set message = "bla"
 
 *)
+
 type clause =
   | CLet of ALVar.formula_id * ALVar.t list * t (* Let clause: let id = definifion;  *)
   | CSet of ALVar.keyword * t (* Set clause: set id = definition *)
   | CDesc of ALVar.keyword * string (* Description clause eg: set message = "..." *)
+  | CPath of [ `WhitelistPath | `BlacklistPath ] * ALVar.t list
 
 type ctl_checker = {
   name : string; (* Checker's name *)
@@ -85,6 +92,7 @@ type ctl_checker = {
 type al_file = {
   import_files : string list;
   global_macros : clause list;
+  global_paths : (string * ALVar.alexp list) list;
   checkers : ctl_checker list
 }
 
@@ -96,6 +104,7 @@ module Debug = struct
       | Body -> Format.pp_print_string fmt "Body"
       | InitExpr -> Format.pp_print_string fmt "InitExpr"
       | Super -> Format.pp_print_string fmt "Super"
+      | Parameters -> Format.pp_print_string fmt "Parameters"
       | Cond -> Format.pp_print_string fmt "Cond"
       | PointerToDecl -> Format.pp_print_string fmt "PointerToDecl" in
     match trans_opt with
@@ -125,13 +134,14 @@ module Debug = struct
                             (Pp.comma_seq Format.pp_print_string)
                             (nodes_to_string nl)
                             pp_formula phi
-    | AX phi -> Format.fprintf fmt "AX(%a)" pp_formula phi
+    | AX (trs, phi) -> Format.fprintf fmt "AX[->%a](%a)" pp_transition trs pp_formula phi
     | EX (trs, phi) -> Format.fprintf fmt "EX[->%a](%a)" pp_transition trs pp_formula phi
-    | AF phi -> Format.fprintf fmt "AF(%a)" pp_formula phi
+    | AF (trs, phi) -> Format.fprintf fmt "AF[->%a](%a)" pp_transition trs pp_formula phi
     | EF (trs, phi) -> Format.fprintf fmt "EF[->%a](%a)" pp_transition trs pp_formula phi
-    | AG phi -> Format.fprintf fmt "AG(%a)" pp_formula phi
+    | AG (trs, phi) -> Format.fprintf fmt "AG[->%a](%a)" pp_transition trs pp_formula phi
     | EG (trs, phi) -> Format.fprintf fmt "EG[->%a](%a)" pp_transition trs pp_formula phi
-    | AU (phi1, phi2) -> Format.fprintf fmt "A[%a UNTIL %a]" pp_formula phi1 pp_formula phi2
+    | AU (trs, phi1, phi2) -> Format.fprintf fmt "A[->%a][%a UNTIL %a]"
+                                pp_transition trs pp_formula phi1 pp_formula phi2
     | EU (trs, phi1, phi2) -> Format.fprintf fmt "E[->%a][%a UNTIL %a]"
                                 pp_transition trs pp_formula phi1 pp_formula phi2
     | EH (arglist, phi) -> Format.fprintf fmt "EH[%a](%a)"
@@ -150,10 +160,11 @@ module Debug = struct
                                       pp_formula phi
 
   let pp_ast ~ast_node_to_highlight ?(prettifier=Fn.id) fmt root =
-    let pp_node_info fmt an = match an with
-      | Stmt (ObjCMessageExpr (_, _, _, {omei_selector})) ->
-          Format.fprintf fmt "selector: \"%s\"" omei_selector
-      | _ -> Format.ifprintf fmt "" in
+    let pp_node_info fmt an =
+      let name = Ctl_parser_types.ast_node_name an in
+      let typ = Ctl_parser_types.ast_node_type an in
+      let cast_kind = Ctl_parser_types.ast_node_cast_kind an in
+      Format.fprintf fmt " %s %s %s" name typ cast_kind in
     let rec pp_children pp_node wrapper fmt level nodes =
       match nodes with
       | [] -> ()
@@ -275,7 +286,8 @@ module Debug = struct
             (pp_ast
                ~ast_node_to_highlight ~prettifier:(ANSITerminal.sprintf highlight_style "%s"))
             ast_root in
-        Logging.out "\nNode ID: %d\tEvaluation stack level: %d\tSource line-number: %s\n"
+        L.progress
+          "@\nNode ID: %d\tEvaluation stack level: %d\tSource line-number: %s@\n"
           eval_node.id
           (Stack.length t.eval_stack)
           (Option.value_map
@@ -284,13 +296,13 @@ module Debug = struct
           | Eval_undefined -> true
           | _ -> false in
         if is_last_occurrence && is_eval_result_undefined then
-          Logging.out
-            "From this step, a transition to a different part of the AST may follow.\n";
+          L.progress
+            "From this step, a transition to a different part of the AST may follow.@\n";
         let phi_str = Format.asprintf "%a" pp_formula eval_node.content.phi in
-        Logging.out "CTL Formula: %s\n\n" phi_str;
-        Logging.out "%s\n" ast_str;
+        L.progress "CTL Formula: %s@\n@\n" phi_str;
+        L.progress "%s@\n" ast_str;
         let quit_token = "q" in
-        Logging.out "Press Enter to continue or type %s to quit... @?" quit_token;
+        L.progress "Press Enter to continue or type %s to quit... @?" quit_token;
         match read_line () |> String.lowercase with
         | s when String.equal s quit_token -> exit 0
         | _ ->
@@ -303,7 +315,7 @@ module Debug = struct
             ) in
       match t.debugger_active, t.breakpoint_line, line_number eval_node.content.ast_node with
       | false, Some break_point_ln, Some ln when ln >= break_point_ln ->
-          Logging.out "Attaching debugger at line %d" ln;
+          L.progress "Attaching debugger at line %d" ln;
           stop_and_explain_step ();
           {t with debugger_active = true}
       | true, _, _ ->
@@ -419,22 +431,29 @@ module Debug = struct
 end
 
 let print_checker c =
-  Logging.out "\n-------------------- \n";
-  Logging.out "\nChecker name: %s\n" c.name;
+  L.(debug Linters Medium) "@\n-------------------- @\n";
+  L.(debug Linters Medium) "@\nChecker name: %s@\n" c.name;
   List.iter ~f:(fun d -> (match d with
       | CSet (keyword, phi) ->
           let cn_str = ALVar.keyword_to_string keyword in
-          Logging.out "    %s=  \n    %a\n\n"
+          L.(debug Linters Medium) "    %s=  @\n    %a@\n@\n"
             cn_str Debug.pp_formula phi
       | CLet (exp, _, phi) ->
           let cn_str = ALVar.formula_id_to_string exp in
-          Logging.out "    %s=  \n    %a\n\n"
+          L.(debug Linters Medium) "    %s=  @\n    %a@\n@\n"
             cn_str Debug.pp_formula phi
       | CDesc (keyword, s) ->
           let cn_str = ALVar.keyword_to_string keyword in
-          Logging.out "    %s=  \n    %s\n\n" cn_str s)
+          L.(debug Linters Medium) "    %s=  @\n    %s@\n@\n" cn_str s
+      | CPath (paths_keyword, paths) ->
+          let keyword =
+            (match paths_keyword with
+             | `WhitelistPath -> "whitelist_path"
+             | _ -> "blacklist_path") in
+          let paths_str = String.concat ~sep:"," (List.map ~f:ALVar.alexp_to_string paths) in
+          L.(debug Linters Medium) "    %s=  @\n    %s@\n@\n" keyword paths_str)
     ) c.definitions;
-  Logging.out "\n-------------------- \n"
+  L.(debug Linters Medium) "@\n-------------------- @\n"
 
 
 let ctl_evaluation_tracker = ref None
@@ -518,44 +537,44 @@ let transition_decl_to_stmt d trs =
   let open Clang_ast_t in
   let temp_res =
     match trs, d with
-    | Some Body, ObjCMethodDecl (_, _, omdi) -> omdi.omdi_body
-    | Some Body, FunctionDecl (_, _, _, fdi)
-    | Some Body, CXXMethodDecl (_, _, _, fdi,_ )
-    | Some Body, CXXConstructorDecl (_, _, _, fdi, _)
-    | Some Body, CXXConversionDecl (_, _, _, fdi, _)
-    | Some Body, CXXDestructorDecl (_, _, _, fdi, _) -> fdi.fdi_body
-    | Some Body, BlockDecl (_, bdi) -> bdi.bdi_body
-    | Some InitExpr, VarDecl (_, _ ,_, vdi) -> vdi.vdi_init_expr
-    | Some InitExpr, ObjCIvarDecl (_, _, _, fldi, _)
-    | Some InitExpr, FieldDecl (_, _, _, fldi)
-    | Some InitExpr, ObjCAtDefsFieldDecl (_, _, _, fldi)-> fldi.fldi_init_expr
-    | Some InitExpr, CXXMethodDecl _
-    | Some InitExpr, CXXConstructorDecl _
-    | Some InitExpr, CXXConversionDecl _
-    | Some InitExpr, CXXDestructorDecl _ ->
+    | Body, ObjCMethodDecl (_, _, omdi) -> omdi.omdi_body
+    | Body, FunctionDecl (_, _, _, fdi)
+    | Body, CXXMethodDecl (_, _, _, fdi,_ )
+    | Body, CXXConstructorDecl (_, _, _, fdi, _)
+    | Body, CXXConversionDecl (_, _, _, fdi, _)
+    | Body, CXXDestructorDecl (_, _, _, fdi, _) -> fdi.fdi_body
+    | Body, BlockDecl (_, bdi) -> bdi.bdi_body
+    | InitExpr, VarDecl (_, _ ,_, vdi) -> vdi.vdi_init_expr
+    | InitExpr, ObjCIvarDecl (_, _, _, fldi, _)
+    | InitExpr, FieldDecl (_, _, _, fldi)
+    | InitExpr, ObjCAtDefsFieldDecl (_, _, _, fldi)-> fldi.fldi_init_expr
+    | InitExpr, CXXMethodDecl _
+    | InitExpr, CXXConstructorDecl _
+    | InitExpr, CXXConversionDecl _
+    | InitExpr, CXXDestructorDecl _ ->
         assert false (* to be done. Requires extending to lists *)
-    | Some InitExpr, EnumConstantDecl (_, _, _, ecdi) -> ecdi.ecdi_init_expr
+    | InitExpr, EnumConstantDecl (_, _, _, ecdi) -> ecdi.ecdi_init_expr
     | _, _ -> None in
   match temp_res with
-  | Some st -> Some (Stmt st)
-  | _ -> None
+  | Some st -> [Stmt st]
+  | _ -> []
 
 let transition_decl_to_decl_via_super d =
   let decl_opt_to_ast_node_opt d_opt =
     match d_opt with
-    | Some d' -> Some (Decl d')
-    | None -> None in
+    | Some d' -> [Decl d']
+    | None -> [] in
   let do_ObjCImplementationDecl d =
     match CAst_utils.get_impl_decl_info d with
     | Some idi ->
         decl_opt_to_ast_node_opt (CAst_utils.get_super_ObjCImplementationDecl idi)
-    | None -> None in
+    | None -> [] in
   match d with
   | Clang_ast_t.ObjCImplementationDecl _ ->
       do_ObjCImplementationDecl d
   | Clang_ast_t.ObjCInterfaceDecl (_, _, _, _, idi) ->
       decl_opt_to_ast_node_opt (CAst_utils.get_decl_opt_with_decl_ref idi.otdi_super)
-  | _ -> None
+  | _ -> []
 
 let transition_stmt_to_stmt_via_condition st =
   let open Clang_ast_t in
@@ -563,32 +582,39 @@ let transition_stmt_to_stmt_via_condition st =
   | IfStmt (_, _ :: _ :: cond :: _)
   | ConditionalOperator (_, cond:: _, _)
   | ForStmt (_, [_; _; cond; _; _])
-  | WhileStmt (_, [_; cond; _]) -> Some (Stmt cond)
-  | _ -> None
+  | WhileStmt (_, [_; cond; _]) -> [Stmt cond]
+  | _ -> []
 
 let transition_stmt_to_decl_via_pointer stmt =
   let open Clang_ast_t in
   match stmt with
   | ObjCMessageExpr (_, _, _, obj_c_message_expr_info) ->
       (match CAst_utils.get_decl_opt obj_c_message_expr_info.Clang_ast_t.omei_decl_pointer with
-       | Some decl -> Some (Decl decl)
-       | None -> None)
+       | Some decl -> [Decl decl]
+       | None -> [])
   | DeclRefExpr (_, _, _, decl_ref_expr_info) ->
       (match CAst_utils.get_decl_opt_with_decl_ref decl_ref_expr_info.Clang_ast_t.drti_decl_ref with
-       | Some decl -> Some (Decl decl)
-       | None -> None)
-  | _ -> None
+       | Some decl -> [Decl decl]
+       | None -> [])
+  | _ -> []
 
-(* given a node an returns the node an' such that an transition to an' via label trans *)
+let transition_decl_to_decl_via_parameters dec =
+  let open Clang_ast_t in
+  match dec with
+  | ObjCMethodDecl (_, _, omdi) ->
+      List.map ~f:(fun d -> Decl d) omdi.omdi_parameters
+  | _ -> []
+
+(* given a node an returns a list of nodes an' such that an transition to an' via label trans *)
 let next_state_via_transition an trans =
   match an, trans with
-  | Decl d, Some Super -> transition_decl_to_decl_via_super d
-  | Decl d, Some InitExpr
-  | Decl d, Some Body -> transition_decl_to_stmt d trans
-  | Stmt st, Some Cond -> transition_stmt_to_stmt_via_condition st
-  | Stmt st, Some PointerToDecl ->
-      transition_stmt_to_decl_via_pointer st
-  | _, _ -> None
+  | Decl d, Super -> transition_decl_to_decl_via_super d
+  | Decl d, Parameters -> transition_decl_to_decl_via_parameters d
+  | Decl d, InitExpr
+  | Decl d, Body -> transition_decl_to_stmt d trans
+  | Stmt st, Cond -> transition_stmt_to_stmt_via_condition st
+  | Stmt st, PointerToDecl -> transition_stmt_to_decl_via_pointer st
+  | _, _ -> []
 
 (* Evaluation of formulas *)
 
@@ -597,45 +623,42 @@ let next_state_via_transition an trans =
 let rec eval_Atomic _pred_name args an lcxt =
   let pred_name = ALVar.formula_id_to_string _pred_name in
   match pred_name, args, an with
+  | "call_class_method", [c; m], an -> CPredicates.call_class_method an c m
+  | "call_function", [m], an -> CPredicates.call_function an m
+  | "call_instance_method", [c; m], an -> CPredicates.call_instance_method an c m
   | "call_method", [m], an -> CPredicates.call_method an m
-  | "call_class_method", [c; m], an ->
-      CPredicates.call_class_method an c m
-  | "call_instance_method", [c; m], an ->
-      CPredicates.call_instance_method an c m
-  | "is_objc_interface_named", [name], an ->
-      CPredicates.is_objc_interface_named an name
-  | "property_named", [word], an ->
-      CPredicates.property_named an word
-  | "is_objc_extension", [], _ -> CPredicates.is_objc_extension lcxt
-  | "is_global_var", [], an -> CPredicates.is_syntactically_global_var an
-  | "is_const_var", [], an ->  CPredicates.is_const_expr_var an
-  | "call_function_named", args, an -> CPredicates.call_function_named an args
-  | "is_strong_property", [], an -> CPredicates.is_strong_property an
+  | "captures_cxx_references", [], _ -> CPredicates.captures_cxx_references an
+  | "context_in_synchronized_block", [], _ -> CPredicates.context_in_synchronized_block lcxt
+  | "declaration_has_name", [decl_name], an -> CPredicates.declaration_has_name an decl_name
+  | "declaration_ref_name", [decl_name], an -> CPredicates.declaration_ref_name an decl_name
+  | "decl_unavailable_in_supported_ios_sdk", [], an ->
+      CPredicates.decl_unavailable_in_supported_ios_sdk lcxt an
+  | "has_cast_kind", [name], an -> CPredicates.has_cast_kind an name
+  | "has_type", [typ], an -> CPredicates.has_type an typ
+  | "isa", [classname], an -> CPredicates.isa an classname
   | "is_assign_property", [], an -> CPredicates.is_assign_property an
-  | "is_property_pointer_type", [], an -> CPredicates.is_property_pointer_type an
-  | "context_in_synchronized_block", [], _ ->
-      CPredicates.context_in_synchronized_block lcxt
+  | "is_binop_with_kind", [kind], an -> CPredicates.is_binop_with_kind an kind
+  | "is_class", [cname], an -> CPredicates.is_class an cname
+  | "is_const_var", [], an ->  CPredicates.is_const_expr_var an
+  | "is_global_var", [], an -> CPredicates.is_syntactically_global_var an
   | "is_ivar_atomic", [], an -> CPredicates.is_ivar_atomic an
   | "is_method_property_accessor_of_ivar", [], an ->
       CPredicates.is_method_property_accessor_of_ivar an lcxt
+  | "is_node", [nodename], an -> CPredicates.is_node an nodename
   | "is_objc_constructor", [], _ -> CPredicates.is_objc_constructor lcxt
   | "is_objc_dealloc", [], _ -> CPredicates.is_objc_dealloc lcxt
-  | "captures_cxx_references", [], _ -> CPredicates.captures_cxx_references an
-  | "is_binop_with_kind", [kind], an ->
-      CPredicates.is_binop_with_kind an kind
-  | "is_unop_with_kind", [kind], an ->
-      CPredicates.is_unop_with_kind an kind
-  | "is_node", [nodename], an -> CPredicates.is_node an nodename
-  | "isa", [classname], an -> CPredicates.isa an classname
-  | "declaration_has_name", [decl_name], an ->
-      CPredicates.declaration_has_name an decl_name
-  | "is_class", [cname], an -> CPredicates.is_class an cname
-  | "decl_unavailable_in_supported_ios_sdk", [], an ->
-      CPredicates.decl_unavailable_in_supported_ios_sdk lcxt an
+  | "is_objc_extension", [], _ -> CPredicates.is_objc_extension lcxt
+  | "is_objc_interface_named", [name], an -> CPredicates.is_objc_interface_named an name
+  | "is_property_pointer_type", [], an -> CPredicates.is_property_pointer_type an
+  | "is_strong_property", [], an -> CPredicates.is_strong_property an
+  | "is_unop_with_kind", [kind], an -> CPredicates.is_unop_with_kind an kind
+  | "method_return_type", [typ], an -> CPredicates.method_return_type an typ
   | "within_responds_to_selector_block", [], an ->
       CPredicates.within_responds_to_selector_block lcxt an
-  | "method_return_type", [typ], an ->
-      CPredicates.method_return_type an typ
+  | "objc_method_has_nth_parameter_of_type", [num; typ], an ->
+      CPredicates.objc_method_has_nth_parameter_of_type an num typ
+  | "using_namespace", [namespace], an ->
+      CPredicates.using_namespace an namespace
   | _ -> failwith
            ("ERROR: Undefined Predicate or wrong set of arguments: '"
             ^ pred_name ^ "'")
@@ -657,12 +680,6 @@ and eval_EF phi an lcxt trans =
       eval_formula phi an lcxt
       || List.exists ~f:(fun an' -> eval_EF phi an' lcxt trans) (get_successor_nodes an)
 
-(* Evaluate phi on node an' such that an -l-> an'. False if an' does not exists *)
-and evaluate_on_transition phi an lcxt l =
-  match next_state_via_transition an l with
-  | Some succ -> eval_formula phi succ lcxt
-  | None -> false
-
 (* an, lcxt |= EX phi  <=> exists an' in Successors(st): an', lcxt |= phi
 
    That is: a (an, lcxt) satifies EX phi if and only if
@@ -670,10 +687,10 @@ and evaluate_on_transition phi an lcxt l =
    such that (an', lcxt) satifies phi
 *)
 and eval_EX phi an lcxt trans =
-  match trans, an with
-  | Some _, _ -> evaluate_on_transition phi an lcxt trans
-  | None, _ ->
-      List.exists ~f:(fun an' -> eval_formula phi an' lcxt) (get_successor_nodes an)
+  let succs = match trans with
+    | Some l -> next_state_via_transition an l
+    | None  -> get_successor_nodes an in
+  List.exists ~f:(fun an' -> eval_formula phi an' lcxt) succs
 
 (* an, lcxt |= E(phi1 U phi2) evaluated using the equivalence
    an, lcxt |= E(phi1 U phi2) <=> an, lcxt |= phi2 or (phi1 and EX(E(phi1 U phi2)))
@@ -690,8 +707,8 @@ and eval_EU phi1 phi2 an lcxt trans =
 
    Same as EU but for the all path quantifier A
 *)
-and eval_AU phi1 phi2 an lcxt =
-  let f = Or (phi2, And (phi1, AX (AU (phi1, phi2)))) in
+and eval_AU phi1 phi2 an lcxt  trans =
+  let f = Or (phi2, And (phi1, AX (trans, AU (trans, phi1, phi2)))) in
   eval_formula f an lcxt
 
 (* an, lcxt |= InNode[node_type_list] phi <=>
@@ -760,13 +777,13 @@ and eval_formula f an lcxt =
         not (eval_formula f1 an lcxt) || (eval_formula f2 an lcxt)
     | InNode (node_type_list, f1) ->
         in_node node_type_list f1 an lcxt
-    | AU (f1, f2) -> eval_AU f1 f2 an lcxt
+    | AU (trans, f1, f2) -> eval_AU f1 f2 an lcxt trans
     | EU (trans, f1, f2) -> eval_EU f1 f2 an lcxt trans
     | EF (trans, f1) -> eval_EF f1 an lcxt trans
-    | AF f1 -> eval_formula (AU (True, f1)) an lcxt
-    | AG f1 -> eval_formula (Not (EF (None, (Not f1)))) an lcxt
+    | AF (trans, f1) -> eval_formula (AU (trans, True, f1)) an lcxt
+    | AG (trans, f1) -> eval_formula (Not (EF (trans, (Not f1)))) an lcxt
     | EX (trans, f1) -> eval_EX f1 an lcxt trans
-    | AX f1 -> eval_formula (Not (EX (None, (Not f1)))) an lcxt
+    | AX (trans, f1) -> eval_formula (Not (EX (trans, (Not f1)))) an lcxt
     | EH (cl, phi) -> eval_EH cl phi an lcxt
     | EG (trans, f1) -> (* st |= EG f1 <=> st |= f1 /\ EX EG f1 *)
         eval_formula (And (f1, EX (trans, (EG (trans, f1))))) an lcxt

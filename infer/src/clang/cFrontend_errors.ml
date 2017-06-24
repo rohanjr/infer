@@ -9,37 +9,63 @@
 
 open! IStd
 
+module F = Format
+
+module L = Logging
 module MF = MarkupFormatter
 
 type linter = {
   condition : CTL.t;
   issue_desc : CIssue.issue_desc;
   def_file : string option;
+  whitelist_paths : ALVar.t list;
+  blacklist_paths : ALVar.t list;
 }
 
 (* If in linter developer mode and if current linter was passed, filter it out *)
-let filter_parsed_linters parsed_linters =
+let filter_parsed_linters_developer parsed_linters =
   if List.length parsed_linters > 1 && Config.linters_developer_mode then
     match Config.linter with
     | None ->
-        failwith ("ERROR: In linters developer mode you should debug only one linter at a time. \
-                   This is important for debugging the rule. Pass the flag \
-                   --linter <name> to specify the linter you want to debug.");
+        failwith "In linters developer mode you should debug only one linter at a time. \
+                  This is important for debugging the rule. Pass the flag \
+                  --linter <name> to specify the linter you want to debug.";
     | Some lint ->
         List.filter ~f:(
           fun (rule : linter) -> String.equal rule.issue_desc.name lint
         ) parsed_linters
   else parsed_linters
 
-let linters_to_string linters =
-  let linter_to_string linters =
-    List.map ~f:(fun (rule : linter) -> rule.issue_desc.name) linters  in
-  String.concat ~sep:"\n" (linter_to_string linters)
+let filter_parsed_linters_by_path parsed_linters source_file =
+  let filter_parsed_linter_by_path linter =
+    let should_lint paths =
+      List.exists
+        ~f:(fun path -> ALVar.compare_str_with_alexp (SourceFile.to_rel_path source_file) path)
+        paths in
+    let whitelist_ok =
+      List.is_empty linter.whitelist_paths || should_lint linter.whitelist_paths in
+    let blacklist_ok =
+      List.is_empty linter.blacklist_paths ||  not (should_lint linter.blacklist_paths) in
+    whitelist_ok && blacklist_ok
+  in
+  List.filter ~f:filter_parsed_linter_by_path parsed_linters
+
+let filter_parsed_linters parsed_linters source_file =
+  let linters = filter_parsed_linters_developer parsed_linters in
+  filter_parsed_linters_by_path linters source_file
+
+let pp_linters fmt linters =
+  let pp_linter fmt {issue_desc={name}} =
+    F.fprintf fmt "%s@\n" name in
+  List.iter ~f:(pp_linter fmt) linters
 
 (* Map a formula id to a triple (visited, parameters, definition).
    Visited is used during the expansion phase to understand if the
    formula was already expanded and, if yes we have a cyclic definifion *)
 type macros_map = (bool * ALVar.t list * CTL.t) ALVar.FormulaIdMap.t
+
+(* Map a path name to a list of paths.  *)
+type paths_map = (ALVar.t list) ALVar.VarMap.t
 
 let single_to_multi checker =
   fun ctx an ->
@@ -74,7 +100,7 @@ let parsed_linters = ref []
 let evaluate_place_holder ph an =
   match ph with
   | "%ivar_name%" -> MF.monospaced_to_string (CFrontend_checkers.ivar_name an)
-  | "%decl_name%" -> MF.monospaced_to_string (CFrontend_checkers.decl_name an)
+  | "%decl_name%" -> MF.monospaced_to_string (Ctl_parser_types.ast_node_name an)
   | "%cxx_ref_captured_in_block%" ->
       MF.monospaced_to_string (CFrontend_checkers.cxx_ref_captured_in_block an)
   | "%decl_ref_or_selector_name%" ->
@@ -82,8 +108,12 @@ let evaluate_place_holder ph an =
   | "%iphoneos_target_sdk_version%" ->
       MF.monospaced_to_string (CFrontend_checkers.iphoneos_target_sdk_version an)
   | "%available_ios_sdk%" -> MF.monospaced_to_string (CFrontend_checkers.available_ios_sdk an)
-  | _ -> (Logging.err "ERROR: helper function %s is unknown. Stop.\n" ph;
-          assert false)
+  | "%type%" -> MF.monospaced_to_string (Ctl_parser_types.ast_node_type an)
+  | "%child_type%" -> MF.monospaced_to_string (Ctl_parser_types.stmt_node_child_type an)
+  | "%name%" -> MF.monospaced_to_string (Ctl_parser_types.ast_node_name an)
+  | _ ->
+      L.internal_error "ERROR: helper function %s is unknown. Stop.@\n" ph;
+      assert false
 
 (* given a message this function searches for a place-holder identifier,
    eg %id%. Then it evaluates id and replaces %id% in message
@@ -98,11 +128,11 @@ let rec expand_message_string message an =
     let _ = Str.search_forward re message 0 in
     let ms = Str.matched_string message in
     let res = evaluate_place_holder ms an in
-    Logging.out "\nMatched string '%s'\n" ms;
+    L.(debug Linters Medium) "@\nMatched string '%s'@\n" ms;
     let re_ms = Str.regexp_string ms in
     let message' = Str.replace_first re_ms res message in
-    Logging.out "Replacing %s in message: \n %s \n" ms message;
-    Logging.out "Resulting message: \n %s \n" message';
+    L.(debug Linters Medium) "Replacing %s in message: @\n %s @\n" ms message;
+    L.(debug Linters Medium) "Resulting message: @\n %s @\n" message';
     expand_message_string message' an
   with Not_found -> message
 
@@ -114,106 +144,63 @@ let string_to_err_kind = function
   | "ERROR" -> Exceptions.Kerror
   | "INFO" -> Exceptions.Kinfo
   | "ADVICE" -> Exceptions.Kadvice
-  | s -> (Logging.err "\n[ERROR] Severity %s does not exist. Stop.\n" s;
-          assert false)
+  | "LIKE" -> Exceptions.Klike
+  | s ->
+      L.internal_error "@\n[ERROR] Severity %s does not exist. Stop.@\n" s;
+      assert false
 
 let string_to_issue_mode m =
   match m with
   | "ON" -> CIssue.On
   | "OFF" -> CIssue.Off
   | s ->
-      (Logging.err "\n[ERROR] Mode %s does not exist. Please specify ON/OFF\n" s;
-       assert false)
+      L.internal_error "@\n[ERROR] Mode %s does not exist. Please specify ON/OFF@\n" s;
+      assert false
 
 (** Convert a parsed checker in list of linters *)
 let create_parsed_linters linters_def_file checkers : linter list =
   let open CIssue in
   let open CTL in
-  Logging.out "\n Converting checkers in (condition, issue) pairs\n";
-  let do_one_checker c =
+  L.(debug Linters Medium) "@\nConverting checkers in (condition, issue) pairs@\n";
+  let do_one_checker checker : linter =
     let dummy_issue = {
-      name = c.name;
+      name = checker.name;
       description = "";
       suggestion = None;
       loc = Location.dummy;
       severity = Exceptions.Kwarning;
+      doc_url = None;
       mode = CIssue.On;
     } in
-    let issue_desc, condition = List.fold ~f:(fun (issue', cond') d  ->
-        match d with
+    let issue_desc, condition, whitelist_paths, blacklist_paths =
+      let process_linter_definitions (issue, cond, wl_paths, bl_paths) description =
+        match description with
         | CSet (av, phi) when ALVar.is_report_when_keyword av ->
-            issue', phi
-        | CDesc (av, msg) when ALVar.is_message_keyword  av ->
-            {issue' with description = msg}, cond'
-        | CDesc (av, sugg) when ALVar.is_suggestion_keyword  av ->
-            {issue' with suggestion = Some sugg}, cond'
+            issue, phi, wl_paths, bl_paths
+        | CDesc (av, msg) when ALVar.is_message_keyword av ->
+            {issue with description = msg}, cond, wl_paths, bl_paths
+        | CDesc (av, sugg) when ALVar.is_suggestion_keyword av ->
+            {issue with suggestion = Some sugg}, cond, wl_paths, bl_paths
         | CDesc (av, sev) when ALVar.is_severity_keyword  av ->
-            {issue' with severity = string_to_err_kind sev}, cond'
+            {issue with severity = string_to_err_kind sev}, cond, wl_paths, bl_paths
         | CDesc (av, m) when ALVar.is_mode_keyword  av ->
-            {issue' with mode = string_to_issue_mode m }, cond'
-        | _ -> issue', cond') ~init:(dummy_issue, CTL.False) c.definitions in
-    if Config.debug_mode then (
-      Logging.out "\nMaking condition and issue desc for checker '%s'\n"
-        c.name;
-      Logging.out "\nCondition =\n     %a\n" CTL.Debug.pp_formula condition;
-      Logging.out "\nIssue_desc = %a\n" CIssue.pp_issue issue_desc);
-    {condition; issue_desc; def_file = Some linters_def_file} in
+            {issue with mode = string_to_issue_mode m }, cond, wl_paths, bl_paths
+        | CDesc (av, doc) when ALVar.is_doc_url_keyword  av ->
+            {issue with doc_url = Some doc }, cond, wl_paths, bl_paths
+        | CPath (`WhitelistPath, paths) ->
+            issue, cond, paths, bl_paths
+        | CPath (`BlacklistPath, paths) ->
+            issue, cond, wl_paths, paths
+        | _ -> issue, cond, wl_paths, bl_paths in
+      List.fold
+        ~f:process_linter_definitions
+        ~init:(dummy_issue, CTL.False, [], [])
+        checker.definitions in
+    L.(debug Linters Medium) "@\nMaking condition and issue desc for checker '%s'@\n" checker.name;
+    L.(debug Linters Medium) "@\nCondition =@\n    %a@\n" CTL.Debug.pp_formula condition;
+    L.(debug Linters Medium) "@\nIssue_desc = %a@\n" CIssue.pp_issue issue_desc;
+    {condition; issue_desc; def_file = Some linters_def_file; whitelist_paths; blacklist_paths;} in
   List.map ~f:do_one_checker checkers
-
-let check_def_well_expanded vars expanded_formula =
-  let open CTL in
-  let check_const c =
-    match c with
-    | ALVar.Regexp c
-    | ALVar.Const c when List.mem vars (ALVar.Var c) ->
-        failwith ("[ERROR]: Const/Regexp '" ^ c ^
-                  "' is used as formal parameter of some LET definition.")
-    | ALVar.Const _
-    | ALVar.Regexp _ -> ()
-    | ALVar.Var v
-    | ALVar.FId (Formula_id v) ->
-        failwith ("[ERROR]: Variable '" ^ v ^
-                  "' could not be substituted and cannot be evaluated") in
-  let rec check_expansion exp_f =
-    match exp_f with
-    | True
-    | False -> ()
-    | Atomic (_, ps) -> List.iter ~f: check_const ps
-    | Not f1 -> check_expansion f1
-    | And (f1, f2) ->
-        check_expansion f1;
-        check_expansion f2
-    | Or (f1, f2) ->
-        check_expansion f1;
-        check_expansion f2
-    | Implies (f1, f2) ->
-        check_expansion f1;
-        check_expansion f2
-    | InNode (node_type_list, f1) ->
-        List.iter ~f:check_const node_type_list;
-        check_expansion f1
-    | AU (f1, f2) ->
-        check_expansion f1;
-        check_expansion f2
-    | EU (_, f1, f2) ->
-        check_expansion f1;
-        check_expansion f2
-    | EF (_, f1) -> check_expansion f1
-    | AF f1 -> check_expansion f1
-    | AG f1 -> check_expansion f1
-    | EX (_, f1) -> check_expansion f1
-    | AX f1 -> check_expansion f1
-    | EH (cl, f1) ->
-        List.iter ~f:check_const cl;
-        check_expansion f1
-    | EG (_, f1) -> check_expansion f1
-    | ET (ntl, _, f1) ->
-        List.iter ~f: check_const ntl;
-        check_expansion f1
-    | ETX (ntl, _, f1) ->
-        List.iter ~f: check_const ntl;
-        check_expansion f1 in
-  check_expansion expanded_formula
 
 let rec apply_substitution f sub =
   let sub_param p = try
@@ -225,23 +212,36 @@ let rec apply_substitution f sub =
   match f with
   | True
   | False -> f
-  | Atomic (name, ps) -> Atomic (name, sub_list_param ps)
-  | Not f1 -> Not (apply_substitution f1 sub)
-  | And (f1, f2) -> And (apply_substitution f1 sub, apply_substitution f2 sub)
-  | Or (f1, f2) -> Or (apply_substitution f1 sub, apply_substitution f2 sub)
-  | Implies (f1, f2) -> Implies (apply_substitution f1 sub, apply_substitution f2 sub)
+  | Atomic (name, ps) ->
+      Atomic (name, sub_list_param ps)
+  | Not f1 ->
+      Not (apply_substitution f1 sub)
+  | And (f1, f2) ->
+      And (apply_substitution f1 sub, apply_substitution f2 sub)
+  | Or (f1, f2) ->
+      Or (apply_substitution f1 sub, apply_substitution f2 sub)
+  | Implies (f1, f2) ->
+      Implies (apply_substitution f1 sub, apply_substitution f2 sub)
   | InNode (node_type_list, f1) ->
       InNode (sub_list_param node_type_list, apply_substitution f1 sub)
-  | AU (f1, f2) -> AU (apply_substitution f1 sub, apply_substitution f2 sub)
+  | AU (trans, f1, f2) ->
+      AU (trans, apply_substitution f1 sub, apply_substitution f2 sub)
   | EU (trans, f1, f2) ->
       EU (trans, apply_substitution f1 sub, apply_substitution f2 sub)
-  | EF (trans, f1) -> EF (trans, apply_substitution f1 sub)
-  | AF f1 -> AF (apply_substitution f1 sub)
-  | AG f1 -> AG (apply_substitution f1 sub)
-  | EX (trans, f1) -> EX (trans, apply_substitution f1 sub)
-  | AX f1 -> AX (apply_substitution f1 sub)
-  | EH (cl, f1) -> EH (sub_list_param cl, apply_substitution f1 sub)
-  | EG (trans, f1) -> EG (trans, apply_substitution f1 sub)
+  | EF (trans, f1) ->
+      EF (trans, apply_substitution f1 sub)
+  | AF (trans, f1) ->
+      AF (trans, apply_substitution f1 sub)
+  | AG (trans, f1) ->
+      AG (trans, apply_substitution f1 sub)
+  | EX (trans, f1) ->
+      EX (trans, apply_substitution f1 sub)
+  | AX (trans, f1) ->
+      AX (trans, apply_substitution f1 sub)
+  | EH (cl, f1) ->
+      EH (sub_list_param cl, apply_substitution f1 sub)
+  | EG (trans, f1) ->
+      EG (trans, apply_substitution f1 sub)
   | ET (ntl, sw, f1) ->
       ET (sub_list_param ntl, sw, apply_substitution f1 sub)
   | ETX (ntl, sw, f1) ->
@@ -249,10 +249,7 @@ let rec apply_substitution f sub =
 
 let expand_formula phi _map _error_msg =
   let fail_with_circular_macro_definition name error_msg =
-    Logging.out
-      "[ERROR]: Macro '%s' has a circular definition.\n Cycle:\n%s"
-      name error_msg;
-    failwith ("Cannot expand....\n") in
+    failwithf "Macro '%s' has a circular definition.@\n Cycle:@\n%s" name error_msg in
   let open CTL in
   let rec expand acc map error_msg =
     match acc with
@@ -260,7 +257,7 @@ let expand_formula phi _map _error_msg =
     | False -> acc
     | Atomic (ALVar.Formula_id (name) as av, actual_param) -> (* it may be a macro *)
         (let error_msg' =
-           error_msg ^ "  -Expanding formula identifier '" ^ name ^"'\n" in
+           error_msg ^ "  -Expanding formula identifier '" ^ name ^"'@\n" in
          (try
             match ALVar.FormulaIdMap.find av map with
             | (true, _, _) ->
@@ -271,7 +268,7 @@ let expand_formula phi _map _error_msg =
                      let f1_sub = apply_substitution f1 sub in
                      let map' = ALVar.FormulaIdMap.add av (true, fparams, f1) map in
                      expand f1_sub map' error_msg'
-                 | None -> failwith ("[ERROR]: Formula identifier '" ^ name ^
+                 | None -> failwith ("Formula identifier '" ^ name ^
                                      "' is not called with the right number of parameters"))
           with Not_found -> acc)) (* in this case it should be a predicate *)
     | Not f1 -> Not (expand f1 map error_msg)
@@ -279,24 +276,36 @@ let expand_formula phi _map _error_msg =
     | Or (f1, f2) -> Or (expand f1 map error_msg, expand f2 map error_msg)
     | Implies (f1, f2) -> Implies (expand f1 map error_msg, expand f2 map error_msg)
     | InNode (node_type_list, f1) -> InNode (node_type_list, expand f1 map error_msg)
-    | AU (f1, f2) -> AU (expand f1 map error_msg, expand f2 map error_msg)
+    | AU (trans, f1, f2) -> AU (trans, expand f1 map error_msg, expand f2 map error_msg)
     | EU (trans, f1, f2) -> EU (trans, expand f1 map error_msg, expand f2 map error_msg)
     | EF (trans, f1) -> EF (trans, expand f1 map error_msg)
-    | AF f1 -> AF (expand f1 map error_msg)
-    | AG f1 -> AG (expand f1 map error_msg)
+    | AF (trans, f1) -> AF (trans, expand f1 map error_msg)
+    | AG (trans, f1) -> AG (trans, expand f1 map error_msg)
     | EX (trans, f1) -> EX (trans, expand f1 map error_msg)
-    | AX f1 -> AX (expand f1 map error_msg)
+    | AX (trans, f1) -> AX (trans, expand f1 map error_msg)
     | EH (cl, f1) -> EH (cl, expand f1 map error_msg)
     | EG (trans, f1) -> EG (trans, expand f1 map error_msg)
     | ET (tl, sw, f1) -> ET (tl, sw, expand f1 map error_msg)
     | ETX (tl, sw, f1) -> ETX (tl, sw, expand f1 map error_msg) in
   expand phi _map _error_msg
 
+let rec expand_path paths path_map =
+  match paths with
+  | [] -> []
+  | ALVar.Var path_var :: rest ->
+      (try
+         let paths = ALVar.VarMap.find path_var path_map in
+         List.append paths (expand_path rest path_map)
+       with Not_found -> failwithf "Path variable %s not found. " path_var)
+  | path :: rest ->
+      path :: (expand_path rest path_map)
+
+
 let _build_macros_map macros init_map =
   let macros_map = List.fold ~f:(fun map' data -> match data with
       | CTL.CLet (key, params, formula) ->
           if ALVar.FormulaIdMap.mem key map' then
-            failwith ("[ERROR] Macro '" ^ (ALVar.formula_id_to_string key) ^
+            failwith ("Macro '" ^ (ALVar.formula_id_to_string key) ^
                       "' has more than one definition.")
           else ALVar.FormulaIdMap.add key (false, params, formula) map'
       | _ -> map') ~init:init_map macros in
@@ -306,17 +315,30 @@ let build_macros_map macros =
   let init_map : macros_map = ALVar.FormulaIdMap.empty in
   _build_macros_map macros init_map
 
+let build_paths_map paths =
+  let build_paths_map_aux paths init_map =
+    let paths_map = List.fold ~f:(fun map' data -> match data with
+        | (path_name, paths) ->
+            if ALVar.VarMap.mem path_name map' then
+              failwith ("Path '" ^ path_name ^ "' has more than one definition.")
+            else ALVar.VarMap.add path_name paths map') ~init:init_map paths in
+    paths_map in
+  build_paths_map_aux paths ALVar.VarMap.empty
+
 (* expands use of let defined formula id in checkers with their definition *)
-let expand_checkers macro_map checkers =
+let expand_checkers macro_map path_map checkers =
   let open CTL in
   let expand_one_checker c =
-    Logging.out " +Start expanding %s\n" c.name;
+    L.(debug Linters Medium) " +Start expanding %s@\n" c.name;
     let map = _build_macros_map c.definitions macro_map in
     let exp_defs = List.fold ~f:(fun defs clause ->
         match clause with
         | CSet (report_when_const, phi) ->
-            Logging.out "  -Expanding report_when\n";
+            L.(debug Linters Medium) "  -Expanding report_when@\n";
             CSet (report_when_const, expand_formula phi map "") :: defs
+        | CPath (black_or_white_list, paths) ->
+            L.(debug Linters Medium) "  -Expanding path@\n";
+            CPath (black_or_white_list, expand_path paths path_map) :: defs
         | cl -> cl :: defs) ~init:[] c.definitions in
     { c with definitions = exp_defs} in
   List.map ~f:expand_one_checker checkers
@@ -341,7 +363,7 @@ let log_frontend_issue translation_unit_context method_decl_opt key issue_desc l
                     |> QualifiedCppName.to_qual_string in
   let key = Hashtbl.hash (key ^ method_name) in
   Reporting.log_issue_from_errlog err_kind errlog exn ~loc ~ltr:trace
-    ~node_id:(0, key) ?linters_def_file
+    ~node_id:(0, key) ?linters_def_file ?doc_url:issue_desc.CIssue.doc_url
 
 let get_current_method context (an : Ctl_parser_types.ast_node) =
   match an with

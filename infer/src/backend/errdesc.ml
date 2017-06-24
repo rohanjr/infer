@@ -17,7 +17,11 @@ module F = Format
 module DExp = DecompiledExp
 
 let vector_matcher = QualifiedCppName.Match.of_fuzzy_qual_names ["std::vector"]
-let mutex_matcher = QualifiedCppName.Match.of_fuzzy_qual_names ["std::mutex"]
+let mutex_matcher = QualifiedCppName.Match.of_fuzzy_qual_names [
+    "std::__infer_mutex_model";
+    "std::mutex";
+    "std::timed_mutex";
+  ]
 
 let is_one_of_classes = QualifiedCppName.Match.match_qualifiers
 
@@ -212,7 +216,6 @@ let rec find_boolean_assignment node pvar true_branch : Procdesc.Node.t option =
 (** Find the Load instruction used to declare normal variable [id],
     and return the expression dereferenced to initialize [id] *)
 let rec _find_normal_variable_load tenv (seen : Exp.Set.t) node id : DExp.t option =
-  let is_infer = not (Config.checkers || Config.eradicate) in
   let find_declaration node = function
     | Sil.Load (id0, e, _, _) when Ident.equal id id0 ->
         if verbose
@@ -244,7 +247,7 @@ let rec _find_normal_variable_load tenv (seen : Exp.Set.t) node id : DExp.t opti
             List.map ~f:unNone args_dexpo in
         Some (DExp.Dretcall (fun_dexp, args_dexp, loc, call_flags))
     | Sil.Store (Exp.Lvar pvar, _, Exp.Var id0, _)
-      when is_infer && Ident.equal id id0 && not (Pvar.is_frontend_tmp pvar) ->
+      when Config.biabduction && Ident.equal id id0 && not (Pvar.is_frontend_tmp pvar) ->
         (* this case is a hack to make bucketing continue to work in the presence of copy
            propagation. previously, we would have code like:
            n1 = foo(); x = n1; n2 = x; n2.toString(), but copy-propagation will optimize this to:
@@ -839,7 +842,8 @@ let create_dereference_desc tenv
             Localise.desc_empty_vector_access (Some pname) (DExp.to_string this_dexp) loc
           else
             desc
-      | Some (DExp.Darrow (dexp, fieldname)) ->
+      | Some (DExp.Darrow (dexp, fieldname))
+      | Some (DExp.Ddot (dexp, fieldname)) ->
           if is_special_field mutex_matcher (Some "null_if_locked") fieldname then
             Localise.desc_double_lock None (DExp.to_string dexp) loc
           else if is_special_field vector_matcher (Some "beginPtr") fieldname then
@@ -1120,6 +1124,9 @@ let explain_condition_always_true_false tenv i cond node loc =
     | None -> None in
   Localise.desc_condition_always_true_false i cond_str_opt loc
 
+let explain_unreachable_code_after loc =
+  Localise.desc_unreachable_code_after loc
+
 (** explain the escape of a stack variable address from its scope *)
 let explain_stack_variable_address_escape loc pvar addr_dexp_opt =
   let addr_dexp_str = match addr_dexp_opt with
@@ -1149,7 +1156,5 @@ let explain_null_test_after_dereference tenv exp node line loc =
       Localise.desc_null_test_after_dereference expr_str line loc
   | None -> Localise.no_desc
 
-(** Print a warning to the err stream at the given location (note: only prints in developer mode) *)
 let warning_err loc fmt_string =
-  L.err ("%a: Warning: " ^^ fmt_string)
-    Location.pp loc
+  L.(debug Analysis Medium) ("%a: Warning: " ^^ fmt_string) Location.pp loc

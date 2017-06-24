@@ -115,94 +115,96 @@ let test_file_renamings_find_previous =
         name >:: create_test test_input expected_output)
 
 let test_relative_complements =
-  let create_test pred (l1, l2) (expected_l1, expected_l2) _ =
+  let create_test pred (l1, l2) (expected_l1, expected_l2, expected_l3) _ =
     let cmp = Int.compare in
-    let output_l1, output_l2 =
+    let output_l1, output_l2, output_l3 =
       DifferentialFilters.VISIBLE_FOR_TESTING_DO_NOT_USE_DIRECTLY.relative_complements
         ~cmp ~pred l1 l2 in
     let list_equal l1 l2 = List.equal ~equal:(fun v1 v2 -> Int.equal (cmp v1 v2) 0) l1 l2 in
     assert_equal
       ~pp_diff:(pp_diff_of_int_list "First list") ~cmp:list_equal expected_l1 output_l1;
     assert_equal
-      ~pp_diff:(pp_diff_of_int_list "Second list") ~cmp:list_equal expected_l2 output_l2 in
+      ~pp_diff:(pp_diff_of_int_list "Second list") ~cmp:list_equal expected_l2 output_l2;
+    assert_equal
+      ~pp_diff:(pp_diff_of_int_list "Third list") ~cmp:list_equal expected_l3 output_l3 in
   [
     (
       "test_relative_complements_with_always_true_pred",
       (fun _ -> true),
       ([0;1;2;3;4;5], [5;3;7;1;1;2]),
-      ([4;0], [7])
+      ([4;0], [5;3;2;1], [7])
     );
     (
       "test_relative_complements_with_even_numbers_pred",
       (fun i -> Int.equal (i mod 2) 0), (* skip when even, keep odd *)
       ([0;1;2;3;4;5], [5;3;7;1;1;2]),
-      ([5;4;3;1;0], [7;5;3;1;1])
+      ([5;4;3;1;0], [2], [7;5;3;1;1])
     );
     (
       "test_relative_complements_with_even_numbers_pred_2",
       (fun i -> Int.equal (i mod 2) 0), (* skip when even, keep odd *)
       ([0;1;2;3;5;5], [1;1;2;3;4;7]),
-      ([5;5;3;1;0], [7;4;3;1;1])
+      ([5;5;3;1;0], [2], [7;4;3;1;1])
     );
     (
       "test_relative_complements_with_always_true_pred_and_disjoint_lists_of_different_length",
       (fun _ -> true),
       ([0;3;2;3;5], [9;7;6;8;4;6;9]),
-      ([5;3;3;2;0], [9;9;8;7;6;6;4])
+      ([5;3;3;2;0], [], [9;9;8;7;6;6;4])
     );
     (
       "test_relative_complements_with_always_true_pred_and_lists_of_different_length",
       (fun _ -> true),
       ([0;3;2;3], [9;7;3;8;0;6;9;4]),
-      ([2], [9;9;8;7;6;4])
+      ([2], [3;0], [9;9;8;7;6;4])
     );
     (
       "test_relative_complements_with_odd_numbers_on_lists_of_different_length",
       (fun i -> Int.equal (i mod 2) 1), (* skip when odd, keep even *)
       ([0;3;2;3], [9;7;3;8;0;6;9;4]),
-      ([2;0], [9;9;8;7;6;4;0])
+      ([2;0], [3], [9;9;8;7;6;4;0])
     );
     (
       "test_relative_complements_with_singleton_lists1",
       (fun _ -> true),
       ([0], [0;1;0;0]),
-      ([], [1])
+      ([], [0], [1])
     );
     (
       "test_relative_complements_with_singleton_lists2",
       (fun _ -> true),
       ([0;1;0;0], [0]),
-      ([1], [])
+      ([1], [0], [])
     );
     (
       "test_relative_complements_with_singleton_lists3",
       (fun _ -> true),
       ([0], [0]),
-      ([], [])
+      ([], [0], [])
     );
     (
       "test_relative_complements_with_singleton_lists4",
       (fun _ -> true),
       ([0], [1]),
-      ([0], [1])
+      ([0], [], [1])
     );
     (
       "test_relative_complements_with_empty_lists1",
       (fun _ -> true),
       ([], [0;1;0;0]),
-      ([], [1;0;0;0])
+      ([], [], [1;0;0;0])
     );
     (
       "test_relative_complements_with_empty_lists2",
       (fun _ -> true),
       ([0;1;0;0], []),
-      ([1;0;0;0], [])
+      ([1;0;0;0], [], [])
     );
     (
       "test_relative_complements_with_empty_lists3",
       (fun _ -> true),
       ([], []),
-      ([], [])
+      ([], [], [])
     );
   ]
   |> List.map
@@ -243,7 +245,7 @@ let test_skip_duplicated_types_on_filenames =
       [3] (sorted_hashes_of_issues diff'.fixed);
     assert_equal
       ~pp_diff:(pp_diff_of_int_list "Hashes of preexisting")
-      [222] (sorted_hashes_of_issues diff'.preexisting) in
+      [22; 55; 111; 222] (sorted_hashes_of_issues diff'.preexisting) in
   "test_skip_duplicated_types_on_filenames" >:: do_assert
 
 let test_value_of_qualifier_tag =
@@ -340,7 +342,7 @@ let test_skip_anonymous_class_renamings =
            ~key:2
            ~hash:2 ();
        ],
-     ([4;5], [2], []));
+     ([4;5], [2], [3]));
     ("test_skip_anonymous_class_renamings_with_empty_qualifier_tags",
      Differential.of_reports
        ~current_report:[
@@ -372,7 +374,7 @@ let test_skip_anonymous_class_renamings =
            ~key:1
            ~hash:4 ();
        ],
-     ([1], [2], []));
+     ([1], [2], [3]));
     ("test_skip_anonymous_class_renamings_with_matching_non_anonymous_procedure_ids",
      Differential.of_reports
        ~current_report:[
@@ -436,7 +438,7 @@ let test_skip_anonymous_class_renamings =
            ~key:1
            ~hash:4 ();
        ],
-     ([3], [4], []));
+     ([3], [4], [1]));
     ("test_skip_anonymous_class_renamings_with_different_call_procedure_qualifier_tags",
      Differential.of_reports
        ~current_report:[
@@ -502,7 +504,7 @@ let test_resolve_infer_eradicate_conflict =
   (* [(test_name, analyzer, expected_hashes); ...] *)
   [
     ("test_resolve_infer_eradicate_conflict_runs_with_infer_analyzer",
-     Config.Infer,
+     Config.BiAbduction,
      ([1], [11], [4]));
     ("test_resolve_infer_eradicate_conflict_skips_with_checkers_analyzer",
      Config.Checkers,
@@ -514,10 +516,46 @@ let test_resolve_infer_eradicate_conflict =
     ~f:(fun (name, analyzer, expected_output) ->
         name >:: create_test analyzer expected_output)
 
+let test_interesting_paths_filter =
+  let report = [
+    create_fake_jsonbug ~bug_type:"bug_type_1" ~file:"file_1.java" ~hash:1 ();
+    create_fake_jsonbug
+      ~bug_type:(Localise.to_issue_id Localise.null_dereference) ~file:"file_2.java" ~hash:2 ();
+    create_fake_jsonbug ~bug_type:"bug_type_1" ~file:"file_4.java" ~hash:4 ();
+  ] in
+  let create_test interesting_paths expected_hashes _ =
+    let filter =
+      DifferentialFilters.VISIBLE_FOR_TESTING_DO_NOT_USE_DIRECTLY.interesting_paths_filter
+        interesting_paths in
+    let filtered_report = filter report in
+    assert_equal
+      ~pp_diff:(pp_diff_of_int_list "Bug hash")
+      expected_hashes (sorted_hashes_of_issues filtered_report) in
+  [
+    ("test_interesting_paths_filter_with_none_interesting_paths",
+     None,
+     [1;2;4]);
+    ("test_interesting_paths_filter_with_some_interesting_paths",
+     Some [
+       SourceFile.create ~warn_on_error:false "file_not_existing.java";
+       SourceFile.create ~warn_on_error:false "file_4.java";
+     ],
+     [4]);
+    ("test_interesting_paths_filter_with_some_interesting_paths_that_are_not_in_report",
+     Some [
+       SourceFile.create ~warn_on_error:false "file_not_existing.java";
+       SourceFile.create ~warn_on_error:false "file_whatever.java";
+     ],
+     []);
+  ] |> List.map
+    ~f:(fun (name, interesting_paths, expected_output) ->
+        name >:: create_test interesting_paths expected_output)
+
 let tests = "differential_filters_suite" >:::
             test_file_renamings_from_json @
             test_file_renamings_find_previous @
             test_relative_complements @
             test_skip_anonymous_class_renamings @
             test_resolve_infer_eradicate_conflict @
+            test_interesting_paths_filter @
             [test_skip_duplicated_types_on_filenames; test_value_of_qualifier_tag]

@@ -26,7 +26,7 @@ module MockTraceElem = struct
 
   let kind t = t
 
-  let make kind _ = kind
+  let make ?indexes:_ kind _ = kind
 
   let pp fmt = function
     | Kind1 -> F.fprintf fmt "Kind1"
@@ -63,9 +63,11 @@ end
 
 module MockSink = struct
   include MockTraceElem
-  type parameter = { sink : t; index : int; report_reachable : bool; }
+  type parameter = { sink : t; index : int; }
 
   let get _ = assert false
+
+  let indexes _ = IntSet.empty
 
   let equal = [%compare.equal : t]
 end
@@ -130,13 +132,8 @@ let tests =
         |> MockTrace.add_sink sink1 in
       assert_bool
         "Appended trace should contain source and sink"
-        (MockTrace.equal (MockTrace.append source_trace footprint_trace call_site) expected_trace);
-
-      let appended_trace = MockTrace.append source_trace source_trace call_site in
-      assert_bool
-        "Appending a trace that doesn't add a new source/sink should add a passthrough"
-        (MockTrace.Passthroughs.mem
-           (Passthrough.make call_site) (MockTrace.passthroughs appended_trace)) in
+        (MockTrace.equal
+           (MockTrace.append source_trace footprint_trace call_site) expected_trace) in
     "append">::append_ in
 
   "trace_domain_suite">:::[get_reports; append]

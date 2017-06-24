@@ -27,9 +27,9 @@ let equal = [%compare.equal : t];
 /** Dump a location */
 let d (loc: t) => L.add_print_action (L.PTloc, Obj.repr loc);
 
+let none file => {line: (-1), col: (-1), file};
 
-/** Dummy location */
-let dummy = {line: (-1), col: (-1), file: SourceFile.invalid};
+let dummy = none (SourceFile.invalid __FILE__);
 
 
 /** Pretty print a location */
@@ -42,4 +42,12 @@ let to_string loc => {
   } else {
     s
   }
+};
+
+
+/** Pretty print a file-position of a location */
+let pp_file_pos f (loc: t) => {
+  let fname = SourceFile.to_string loc.file;
+  let pos = to_string loc;
+  F.fprintf f "%s:%s" fname pos
 };

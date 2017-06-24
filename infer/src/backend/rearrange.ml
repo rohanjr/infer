@@ -63,14 +63,14 @@ let check_bad_index tenv pname p len index loc =
         let exn =
           Exceptions.Array_out_of_bounds_l1
             (Errdesc.explain_array_access tenv deref_str p loc, __POS__) in
-        Reporting.log_warning pname exn
+        Reporting.log_warning_deprecated pname exn
       else if len_is_constant then
         let deref_str = Localise.deref_str_array_bound len_const_opt index_const_opt in
         let desc = Errdesc.explain_array_access tenv deref_str p loc in
         let exn = if index_has_bounds ()
           then Exceptions.Array_out_of_bounds_l2 (desc, __POS__)
           else Exceptions.Array_out_of_bounds_l3 (desc, __POS__) in
-        Reporting.log_warning pname exn
+        Reporting.log_warning_deprecated pname exn
     end
 
 (** Perform bounds checking *)
@@ -133,9 +133,9 @@ let rec create_struct_values pname tenv orig_prop footprint_part kind max_stamp 
         let e' = Sil.array_clean_new_index footprint_part e in
         let len = Exp.Var (new_id ()) in
         let se = Sil.Earray (len, [(e', se')], inst) in
-        let res_t = Typ.mk (Tarray (res_t', None)) in
+        let res_t = Typ.mk (Tarray (res_t', None, None)) in
         (Sil.Aeq (e, e') :: atoms', se, res_t)
-    | Tarray (t', len_), off ->
+    | Tarray (t', len_, stride_), off ->
         let len = match len_ with
           | None -> Exp.Var (new_id ())
           | Some len -> Exp.Const (Const.Cint len) in
@@ -149,15 +149,15 @@ let rec create_struct_values pname tenv orig_prop footprint_part kind max_stamp 
                  pname tenv orig_prop footprint_part kind max_stamp t' off' inst in
              let e' = Sil.array_clean_new_index footprint_part e in
              let se = Sil.Earray (len, [(e', se')], inst) in
-             let res_t = Typ.mk ~default:t (Tarray (res_t', len_)) in
+             let res_t = Typ.mk ~default:t (Tarray (res_t', len_, stride_)) in
              (Sil.Aeq(e, e') :: atoms', se, res_t)
          | (Sil.Off_fld _) :: _ ->
              assert false
         )
-    | Tint _, [] | Tfloat _, [] | Tvoid, [] | Tfun _, [] | Tptr _, [] ->
+    | Tint _, [] | Tfloat _, [] | Tvoid, [] | Tfun _, [] | Tptr _, [] | TVar _, [] ->
         let id = new_id () in
         ([], Sil.Eexp (Exp.Var id, inst), t)
-    | (Tint _ | Tfloat _ | Tvoid | Tfun _ | Tptr _), (Off_index e) :: off' ->
+    | (Tint _ | Tfloat _ | Tvoid | Tfun _ | Tptr _ | TVar _), (Off_index e) :: off' ->
         (* In this case, we lift t to the t array. *)
         let t', mk_typ_f = match t.Typ.desc with
           | Typ.Tptr(t', _) -> t', (function desc -> Typ.mk ~default:t desc)
@@ -168,9 +168,9 @@ let rec create_struct_values pname tenv orig_prop footprint_part kind max_stamp 
             pname tenv orig_prop footprint_part kind max_stamp t' off' inst in
         let e' = Sil.array_clean_new_index footprint_part e in
         let se = Sil.Earray (len, [(e', se')], inst) in
-        let res_t = mk_typ_f (Tarray (res_t', None)) in
+        let res_t = mk_typ_f (Tarray (res_t', None, None)) in
         (Sil.Aeq(e, e') :: atoms', se, res_t)
-    | Tint _, _ | Tfloat _, _ | Tvoid, _ | Tfun _, _ | Tptr _, _ ->
+    | Tint _, _ | Tfloat _, _ | Tvoid, _ | Tfun _, _ | Tptr _, _ | TVar _, _ ->
         fail t off __POS__
   in
   if Config.trace_rearrange then
@@ -261,10 +261,12 @@ let rec _strexp_extend_values
             if Config.type_size then Exp.one (* Exp.Sizeof (typ, Subtype.exact) *)
             else Exp.Var (new_id ()) in
       let se_new = Sil.Earray (len, [(Exp.zero, se)], inst) in
-      let typ_new = Typ.mk (Tarray (typ, None)) in
+      let typ_new = Typ.mk (Tarray (typ, None, None)) in
       _strexp_extend_values
         pname tenv orig_prop footprint_part kind max_stamp se_new typ_new off inst
-  | (Off_index e) :: off', Sil.Earray (len, esel, inst_arr), Tarray (typ', len_for_typ') -> (
+  | (Off_index e) :: off',
+    Sil.Earray (len, esel, inst_arr),
+    Tarray (typ', len_for_typ', stride) -> (
       bounds_check tenv pname orig_prop len e (State.get_loc ());
       match List.find ~f:(fun (e', _) -> Exp.equal e e') esel with
       | Some (_, se') ->
@@ -277,7 +279,7 @@ let rec _strexp_extend_values
             if (Typ.equal res_typ' typ') || Int.equal (List.length res_esel') 1 then
               ( res_atoms'
               , Sil.Earray (len, res_esel', inst_arr)
-              , Typ.mk ~default:typ (Tarray (res_typ', len_for_typ')) )
+              , Typ.mk ~default:typ (Tarray (res_typ', len_for_typ', stride)) )
               :: acc
             else
               raise (Exceptions.Bad_footprint __POS__) in
@@ -310,7 +312,7 @@ and array_case_analysis_index pname tenv orig_prop
 
   if index_in_array then
     let array_default = Sil.Earray (array_len, array_cont, inst_arr) in
-    let typ_default = Typ.mk ~default:typ_array (Tarray (typ_cont, typ_array_len)) in
+    let typ_default = Typ.mk ~default:typ_array (Tarray (typ_cont, typ_array_len, None)) in
     [([], array_default, typ_default)]
   else if !Config.footprint then begin
     let atoms, elem_se, elem_typ =
@@ -319,7 +321,7 @@ and array_case_analysis_index pname tenv orig_prop
     check_sound elem_typ;
     let cont_new = List.sort ~cmp:[%compare: Exp.t * Sil.strexp] ((index, elem_se):: array_cont) in
     let array_new = Sil.Earray (array_len, cont_new, inst_arr) in
-    let typ_new = Typ.mk ~default:typ_array (Tarray (elem_typ, typ_array_len)) in
+    let typ_new = Typ.mk ~default:typ_array (Tarray (elem_typ, typ_array_len, None)) in
     [(atoms, array_new, typ_new)]
   end
   else begin
@@ -333,7 +335,7 @@ and array_case_analysis_index pname tenv orig_prop
         let cont_new =
           List.sort ~cmp:[%compare: Exp.t * Sil.strexp] ((index, elem_se):: array_cont) in
         let array_new = Sil.Earray (array_len, cont_new, inst_arr) in
-        let typ_new = Typ.mk ~default:typ_array (Tarray (elem_typ, typ_array_len)) in
+        let typ_new = Typ.mk ~default:typ_array (Tarray (elem_typ, typ_array_len, None)) in
         [(atoms, array_new, typ_new)]
       end in
     let rec handle_case acc isel_seen_rev = function
@@ -349,7 +351,7 @@ and array_case_analysis_index pname tenv orig_prop
                   let atoms_new = Sil.Aeq (index, i) :: atoms' in
                   let isel_new = list_rev_and_concat isel_seen_rev ((i, se'):: isel_unseen) in
                   let array_new = Sil.Earray (array_len, isel_new, inst_arr) in
-                  let typ_new = Typ.mk ~default:typ_array (Tarray (typ', typ_array_len)) in
+                  let typ_new = Typ.mk ~default:typ_array (Tarray (typ', typ_array_len, None)) in
                   (atoms_new, array_new, typ_new):: acc')
               ~init:[]
               atoms_se_typ_list in
@@ -430,8 +432,7 @@ let mk_ptsto_exp_footprint
      * will fix them during the re - execution phase *)
     if not (Config.angelic_execution && !Config.footprint) then
       begin
-        if Config.developer_mode then
-          L.err "!!!! Footprint Error, Bad Root : %a !!!! @\n" Exp.pp lexp;
+        L.internal_error "!!!! Footprint Error, Bad Root : %a !!!! @\n" Exp.pp lexp;
         let deref_str = Localise.deref_str_dangling None in
         let err_desc =
           Errdesc.explain_dereference tenv deref_str orig_prop (State.get_loc ()) in
@@ -814,9 +815,9 @@ let add_guarded_by_constraints tenv prop lexp pdesc =
     let warn accessed_fld guarded_by_str =
       let loc = State.get_loc () in
       let err_desc =
-        Localise.desc_unsafe_guarded_by_access pname accessed_fld guarded_by_str loc in
+        Localise.desc_unsafe_guarded_by_access accessed_fld guarded_by_str loc in
       let exn = Exceptions.Unsafe_guarded_by_access (err_desc, __POS__) in
-      Reporting.log_error pname exn in
+      Reporting.log_error_deprecated pname exn in
     let rec is_read_write_lock typ =
       let str_is_read_write_lock str = String.is_suffix ~suffix:"ReadWriteUpdateLock" str ||
                                        String.is_suffix ~suffix:"ReadWriteLock" str  in
@@ -1146,7 +1147,7 @@ let type_at_offset tenv texp off =
         | None ->
             None
       )
-    | (Off_index _) :: off', Tarray (typ', _) ->
+    | (Off_index _) :: off', Tarray (typ', _, _) ->
         strip_offset off' typ'
     | _ -> None in
   match texp with
@@ -1170,7 +1171,7 @@ let check_type_size tenv pname prop texp off typ_from_instr =
         let exn =
           Exceptions.Pointer_size_mismatch (
             Errdesc.explain_dereference tenv deref_str prop loc, __POS__) in
-        Reporting.log_warning pname exn
+        Reporting.log_warning_deprecated pname exn
       end
   | None ->
       L.d_str "texp: "; Sil.d_texp_full texp; L.d_ln ()
@@ -1204,7 +1205,7 @@ let rec iter_rearrange
             typ_from_instr
       )
     | Sil.Off_index _ :: off ->
-        Typ.mk (Tarray (root_typ_of_offsets off, None))
+        Typ.mk (Tarray (root_typ_of_offsets off, None, None))
     | _ ->
         typ_from_instr in
   let typ = root_typ_of_offsets (Sil.exp_get_offsets lexp) in
@@ -1367,8 +1368,9 @@ let check_dereference_error tenv pdesc (prop : Prop.normal Prop.t) lexp loc =
   let is_deref_of_nullable =
     let is_definitely_non_null exp prop =
       Prover.check_disequal tenv prop exp Exp.zero in
-    Config.report_nullable_inconsistency && not (is_definitely_non_null root prop)
-    && Option.is_some nullable_var_opt in
+    Config.report_nullable_inconsistency
+    && Option.is_some nullable_var_opt
+    && not (is_definitely_non_null root prop) in
   let relevant_attributes_getters = [
     Attribute.get_resource tenv;
     Attribute.get_undef tenv;

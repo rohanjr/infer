@@ -17,7 +17,7 @@ let target_of_string target =
       let flavors = String.split flavors_string ~on:',' in
       {name; flavors}
   | name::[] -> { name; flavors=[] }
-  | _ -> failwithf "Error: cannot parse target %s" target
+  | _ -> failwithf "cannot parse target %s" target
 
 let string_of_target { name; flavors } =
   let pp_string fmt s = Format.fprintf fmt "%s" s in
@@ -47,13 +47,13 @@ let add_flavor_to_target target =
       add "uber-compilation-database"
   | Some `NoDeps, _ ->
       add "compilation-database"
-  | None, Compile ->
+  | None, CompileOnly ->
       target
-  | None, (Linters | Capture) ->
+  | None, (Linters | CaptureOnly) ->
       add "infer-capture-all"
-  | None, (Bufferoverrun | Checkers | Infer | Quandary | Siof | Threadsafety) ->
+  | None, (BiAbduction | Checkers) ->
       add "infer"
-  | None, (Eradicate | Tracing | Crashcontext) ->
+  | None, (Eradicate | Crashcontext) ->
       failwithf "Analyzer %s is Java-only; not supported with Buck flavors"
         (Config.string_of_analyzer Config.analyzer)
 

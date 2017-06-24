@@ -17,12 +17,14 @@ type log_t =
   ?session: int ->
   ?ltr: Errlog.loc_trace ->
   ?linters_def_file:string ->
+  ?doc_url:string ->
   exn ->
   unit
 
 type log_issue_from_errlog = Errlog.t -> log_t
 
-let log_issue_from_errlog err_kind err_log ?loc ?node_id ?session ?ltr ?linters_def_file exn =
+let log_issue_from_errlog err_kind err_log ?loc ?node_id ?session ?ltr ?linters_def_file
+    ?doc_url exn =
   let loc = match loc with
     | None -> State.get_loc ()
     | Some loc -> loc in
@@ -40,25 +42,42 @@ let log_issue_from_errlog err_kind err_log ?loc ?node_id ?session ?ltr ?linters_
     | _ -> let err_name, _, _, _, _, _, _ =  Exceptions.recognize_exception exn in
         (Localise.to_issue_id err_name) in
   if (Inferconfig.is_checker_enabled err_name) then
-    Errlog.log_issue err_kind err_log loc node_id session ltr ?linters_def_file exn
+    Errlog.log_issue err_kind err_log loc node_id session ltr ?linters_def_file ?doc_url exn
 
 
-let log_issue_from_summary err_kind summary ?loc ?node_id ?session ?ltr ?linters_def_file exn =
+let log_issue_from_summary err_kind summary ?loc ?node_id ?session ?ltr ?linters_def_file
+    ?doc_url exn =
+  let is_generated_method =
+    Typ.Procname.java_is_generated (Specs.get_proc_name summary) in
   let should_suppress_lint =
     Config.curr_language_is Config.Java &&
     Annotations.ia_is_suppress_lint
       (fst summary.Specs.attributes.ProcAttributes.method_annotation) in
-  if not should_suppress_lint
+  if should_suppress_lint || is_generated_method
   then
+    () (* Skip the reporting *)
+  else
     let err_log = summary.Specs.attributes.ProcAttributes.err_log in
-    log_issue_from_errlog err_kind err_log ?loc ?node_id ?session ?ltr ?linters_def_file exn
+    log_issue_from_errlog err_kind err_log ?loc ?node_id ?session ?ltr ?linters_def_file
+      ?doc_url exn
 
-let log_issue err_kind proc_name ?loc ?node_id ?session ?ltr ?linters_def_file exn =
+let log_issue_deprecated
+    ?(store_summary=false)
+    err_kind
+    proc_name
+    ?loc
+    ?node_id
+    ?session
+    ?ltr
+    ?linters_def_file
+    ?doc_url
+    exn =
   match Specs.get_summary proc_name with
   | Some summary ->
-      log_issue_from_summary err_kind summary ?loc ?node_id ?session ?ltr ?linters_def_file exn;
-      if Config.checkers then
-        (* TODO (#16348004): Remove this once Specs.get_summary_unsafe is entirely removed *)
+      log_issue_from_summary err_kind summary ?loc ?node_id ?session ?ltr ?linters_def_file
+        ?doc_url exn;
+      if store_summary then
+        (* TODO (#16348004): This is currently needed as ThreadSafety works as a cluster checker *)
         Specs.store_summary summary
   | None ->
       failwithf
@@ -71,10 +90,15 @@ let log_error_from_errlog = log_issue_from_errlog Exceptions.Kerror
 let log_warning_from_errlog = log_issue_from_errlog Exceptions.Kwarning
 let log_info_from_errlog = log_issue_from_errlog Exceptions.Kinfo
 
-let log_error_from_summary = log_issue_from_summary Exceptions.Kerror
-let log_warning_from_summary = log_issue_from_summary Exceptions.Kwarning
-let log_info_from_summary = log_issue_from_summary Exceptions.Kwarning
+let log_error = log_issue_from_summary Exceptions.Kerror
+let log_warning = log_issue_from_summary Exceptions.Kwarning
+let log_info = log_issue_from_summary Exceptions.Kwarning
 
-let log_error = log_issue Exceptions.Kerror
-let log_warning = log_issue Exceptions.Kwarning
-let log_info = log_issue Exceptions.Kinfo
+let log_error_deprecated ?(store_summary=false) =
+  log_issue_deprecated ~store_summary Exceptions.Kerror
+
+let log_warning_deprecated ?(store_summary=false) =
+  log_issue_deprecated ~store_summary Exceptions.Kwarning
+
+let log_info_deprecated ?(store_summary=false) =
+  log_issue_deprecated ~store_summary Exceptions.Kinfo

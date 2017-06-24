@@ -41,6 +41,8 @@ module LocksDomain : AbstractDomain.S with type astate = bool
 
 module ThreadsDomain : AbstractDomain.S with type astate = bool
 
+module ThumbsUpDomain : AbstractDomain.S with type astate = bool
+
 module PathDomain : module type of SinkTrace.Make(TraceElem)
 
 (** attribute attached to a boolean variable specifying what it means when the boolean is true *)
@@ -87,10 +89,31 @@ module AttributeMapDomain : sig
   val add_attribute : AccessPath.Raw.t -> Attribute.t -> astate -> astate
 end
 
+
+(** Excluders: Two things can provide for mutual exclusion: holding a lock,
+    and knowing that you are on a particular thread. Here, we
+    abstract it to "some" lock and "any particular" thread (typically, UI thread)
+    For a more precide semantics we would replace Thread by representatives of
+    thread id's and Lock by multiple differnet lock id's.
+    Both indicates that you both know the thread and hold a lock.
+    There is no need for a lattice relation between Thread, Lock and Both:
+    you don't ever join Thread and Lock, rather, they are treated pointwise.
+ **)
+module Excluder: sig
+  type t =
+    | Thread
+    | Lock
+    | Both
+  [@@deriving compare]
+
+  val pp : F.formatter -> t -> unit
+end
+
 module AccessPrecondition : sig
   type t =
-    | Protected
-    (** access safe due to held lock (i.e., pre is true *)
+    | Protected of Excluder.t
+    (** access potentially protected for mutual exclusion by
+        lock or thread or both *)
     | Unprotected of int option
     (** access rooted in formal at index i. Safe if actual passed at index is owned (i.e.,
         !owned(i) implies an unsafe access). Unprotected None means the access is unsafe unless a
@@ -101,14 +124,12 @@ module AccessPrecondition : sig
   val unprotected : t
 
   val pp : F.formatter -> t -> unit
-
-  module Map : PrettyPrintable.PPMap with type key = t
 end
 
 (** map of access precondition |-> set of accesses. the map should hold all accesses to a
     possibly-unowned access path *)
 module AccessDomain : sig
-  include module type of AbstractDomain.Map (AccessPrecondition.Map) (PathDomain)
+  include module type of AbstractDomain.Map (AccessPrecondition) (PathDomain)
 
   (* add the given (access, precondition) pair to the map *)
   val add_access : AccessPrecondition.t -> TraceElem.t -> astate -> astate
@@ -119,22 +140,23 @@ end
 
 type astate =
   {
+    thumbs_up : ThreadsDomain.astate;
+    (** boolean that is true if we think we have a proof *)
     threads : ThreadsDomain.astate;
     (** boolean that is true if we know we are on UI/main thread *)
     locks : LocksDomain.astate;
     (** boolean that is true if a lock must currently be held *)
     accesses : AccessDomain.astate;
     (** read and writes accesses performed without ownership permissions *)
-    id_map : IdAccessPathMapDomain.astate;
-    (** map used to decompile temporary variables into access paths *)
     attribute_map : AttributeMapDomain.astate;
     (** map of access paths to attributes such as owned, functional, ... *)
   }
 
 (** same as astate, but without [id_map]/[owned] (since they are local) and with the addition of the
     attributes associated with the return value *)
-type summary = ThreadsDomain.astate * LocksDomain.astate
-               * AccessDomain.astate * AttributeSetDomain.astate
+type summary =
+  ThumbsUpDomain.astate * ThreadsDomain.astate * LocksDomain.astate
+  * AccessDomain.astate * AttributeSetDomain.astate
 
 include AbstractDomain.WithBottom with type astate := astate
 

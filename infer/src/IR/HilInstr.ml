@@ -22,13 +22,13 @@ let pp_call fmt = function
   | Indirect access_path -> F.fprintf fmt "*%a" AccessPath.Raw.pp access_path
 
 type t =
-  | Write of AccessPath.Raw.t * HilExp.t * Location.t
+  | Assign of AccessPath.Raw.t * HilExp.t * Location.t
   | Assume of HilExp.t * [`Then | `Else] * Sil.if_kind * Location.t
   | Call of AccessPath.base option * call * HilExp.t list * CallFlags.t * Location.t
 [@@deriving compare]
 
 let pp fmt = function
-  | Write (access_path, exp, loc) ->
+  | Assign (access_path, exp, loc) ->
       F.fprintf fmt "%a := %a [%a]" AccessPath.Raw.pp access_path HilExp.pp exp Location.pp loc
   | Assume (exp, _, _, loc) ->
       F.fprintf fmt "assume %a [%a]" HilExp.pp exp Location.pp loc
@@ -54,7 +54,7 @@ let of_sil ~f_resolve_id (instr : Sil.instr) =
     | [rhs_access_path] ->
         Bind (lhs_id, rhs_access_path)
     | _ ->
-        Instr (Write (((lhs_id, rhs_typ), []), rhs_hil_exp, loc)) in
+        Instr (Assign (((lhs_id, rhs_typ), []), rhs_hil_exp, loc)) in
   match instr with
   | Load (lhs_id, rhs_exp, rhs_typ, loc) ->
       analyze_id_assignment (Var.of_id lhs_id) rhs_exp rhs_typ loc
@@ -68,9 +68,30 @@ let of_sil ~f_resolve_id (instr : Sil.instr) =
   | Store (lhs_exp, typ, rhs_exp, loc) ->
       let lhs_access_path =
         match HilExp.of_sil ~f_resolve_id lhs_exp typ with
-        | AccessPath ap -> ap
-        | _ -> invalid_argf "Non-assignable LHS expression %a" Exp.pp lhs_exp in
-      Instr (Write (lhs_access_path, HilExp.of_sil ~f_resolve_id rhs_exp typ, loc))
+        | AccessPath ap ->
+            ap
+        | BinaryOperator (_, exp0, exp1) ->
+            (* pointer arithmetic. somewhere in one of the expressions, there should be at least
+               one pointer type represented as an access path. just use that access path and forget
+               about the arithmetic. if you need to model this more precisely, you should be using
+               SIL instead *)
+            begin
+              match HilExp.get_access_paths exp0 with
+              | ap :: _ ->
+                  ap
+              | [] ->
+                  begin
+                    match HilExp.get_access_paths exp1 with
+                    | ap :: _ ->
+                        ap
+                    | [] ->
+                        invalid_argf
+                          "Invalid pointer arithmetic expression %a used as LHS" Exp.pp lhs_exp
+                  end
+            end
+        | _ ->
+            invalid_argf "Non-assignable LHS expression %a" Exp.pp lhs_exp in
+      Instr (Assign (lhs_access_path, HilExp.of_sil ~f_resolve_id rhs_exp typ, loc))
   | Call (ret_opt, call_exp, formals, loc, call_flags) ->
       let hil_ret = Option.map ~f:(fun (ret_id, ret_typ) -> Var.of_id ret_id, ret_typ) ret_opt in
       let hil_call =

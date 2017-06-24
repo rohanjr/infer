@@ -20,7 +20,7 @@ module MockTrace = Trace.Make(struct
 
         let get pname _ =
           if String.is_prefix ~prefix:"SOURCE" (Typ.Procname.to_string pname)
-          then Some (CallSite.make pname Location.dummy)
+          then Some (CallSite.make pname Location.dummy, None)
           else None
 
         let get_tainted_formals _ _ =
@@ -32,8 +32,10 @@ module MockTrace = Trace.Make(struct
 
         let get pname _ _ =
           if String.is_prefix ~prefix:"SINK" (Typ.Procname.to_string pname)
-          then [CallSite.make pname Location.dummy, 0, false]
-          else []
+          then Some (CallSite.make pname Location.dummy, IntSet.singleton 0)
+          else None
+
+        let indexes _ = IntSet.empty
       end)
 
     let should_report _ _ = false
@@ -47,9 +49,12 @@ module MockTaintAnalysis = TaintAnalysis.Make(struct
     let to_summary_access_tree _ = assert false
     let handle_unknown_call _ _ _ _ = []
     let is_taintable_type _ = true
+    let get_model _ _ _ _ _ = None
+    let get_sanitizer _ = None
   end)
 
-module TestInterpreter = AnalyzerTester.Make (ProcCfg.Normal) (MockTaintAnalysis.TransferFunctions)
+module TestInterpreter =
+  AnalyzerTester.Make (ProcCfg.Normal) (LowerHil.Make (MockTaintAnalysis.TransferFunctions))
 
 let tests =
   let open OUnit2 in
@@ -89,7 +94,7 @@ let tests =
            if not (MockTrace.is_empty t)
            then (ap, t) :: acc
            else acc)
-        astate.MockTaintAnalysis.Domain.access_tree
+        (fst astate)
         [] in
     PrettyPrintable.pp_collection ~pp_item fmt (List.rev trace_assocs) in
   let assign_to_source ret_str =
@@ -178,14 +183,14 @@ let tests =
     [
       assign_to_source "ret_id";
       call_sink "ret_id";
-      invariant "{ ret_id$0 => (SOURCE -> SINK) }";
+      invariant "{ ret_id$0* => (SOURCE -> SINK) }";
     ];
     "source -> sink via var",
     [
       assign_to_source "ret_id";
       var_assign_id "actual" "ret_id";
       call_sink_with_exp (var_of_str "actual");
-      invariant "{ ret_id$0 => (SOURCE -> ?), &actual => (SOURCE -> SINK) }";
+      invariant "{ ret_id$0 => (SOURCE -> ?), &actual* => (SOURCE -> SINK) }";
     ];
     "source -> sink via var then ident",
     [
@@ -193,7 +198,7 @@ let tests =
       var_assign_id "x" "ret_id";
       id_assign_var "actual_id" "x";
       call_sink "actual_id";
-      invariant "{ ret_id$0 => (SOURCE -> ?), &x => (SOURCE -> SINK) }";
+      invariant "{ ret_id$0 => (SOURCE -> ?), &x* => (SOURCE -> SINK) }";
     ];
     "source -> sink via field",
     [
@@ -201,7 +206,7 @@ let tests =
       assign_id_to_field "base_id" "f" "ret_id";
       read_field_to_id "actual_id" "base_id" "f";
       call_sink "actual_id";
-      invariant "{ base_id$0.f => (SOURCE -> SINK), ret_id$0 => (SOURCE -> ?) }";
+      invariant "{ base_id$0.f* => (SOURCE -> SINK), ret_id$0 => (SOURCE -> ?) }";
     ];
     "source -> sink via field read from var",
     [
@@ -212,18 +217,18 @@ let tests =
       read_field_to_id "read_id" "var_id" "f";
       call_sink "read_id";
       invariant
-        "{ base_id$0.f => (SOURCE -> ?), ret_id$0 => (SOURCE -> ?), &var.f => (SOURCE -> SINK) }";
+        "{ base_id$0.f => (SOURCE -> ?), ret_id$0 => (SOURCE -> ?), &var.f* => (SOURCE -> SINK) }";
     ];
     "source -> sink via cast",
     [
       assign_to_source "ret_id";
       cast_id_to_id "cast_id" (Typ.mk Tvoid) "ret_id";
       call_sink "cast_id";
-      invariant "{ ret_id$0 => (SOURCE -> SINK) }";
+      invariant "{ ret_id$0* => (SOURCE -> SINK) }";
     ];
 
   ] |> TestInterpreter.create_tests
       ~pp_opt:pp_sparse
-      FormalMap.empty
-      ~initial:MockTaintAnalysis.Domain.empty in
+      { formal_map=FormalMap.empty; summary=Specs.dummy; }
+      ~initial:(MockTaintAnalysis.Domain.empty, IdAccessPathMapDomain.empty) in
   "taint_test_suite">:::test_list

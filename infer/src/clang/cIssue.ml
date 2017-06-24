@@ -17,6 +17,7 @@ type issue_desc = {
   mode : mode;
   description : string; (* Description in the error message *)
   suggestion : string option; (* an optional suggestion or correction *)
+  doc_url : string option;
   loc : Location.t; (* location in the code *)
 }
 
@@ -26,15 +27,15 @@ let string_of_mode m =
   | Off -> "Off"
 
 let pp_issue fmt issue =
-  Format.fprintf fmt "{\n   Name = %s\n" (issue.name);
-  Format.fprintf fmt "   Severity = %s \n" (Exceptions.err_kind_string issue.severity);
-  Format.fprintf fmt "   Mode = %s \n" (string_of_mode issue.mode);
-  Format.fprintf fmt "   Descrption = %s \n" issue.description;
+  Format.fprintf fmt "{@\n   Name = %s@\n" (issue.name);
+  Format.fprintf fmt "   Severity = %s@\n" (Exceptions.err_kind_string issue.severity);
+  Format.fprintf fmt "   Mode = %s@\n" (string_of_mode issue.mode);
+  Format.fprintf fmt "   Descrption = %s@\n" issue.description;
   (match issue.suggestion with
-   | Some s -> Format.fprintf fmt "   Suggestion = %s\n" s
+   | Some s -> Format.fprintf fmt "   Suggestion = %s@\n" s
    | _ -> ());
-  Format.fprintf fmt "   Loc = %s \n" (Location.to_string issue.loc);
-  Format.fprintf fmt "}\n"
+  Format.fprintf fmt "   Loc = %s@\n" (Location.to_string issue.loc);
+  Format.fprintf fmt "}@\n"
 
 let should_run_check mode =
   match mode with

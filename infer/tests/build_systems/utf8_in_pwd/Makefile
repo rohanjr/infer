@@ -65,7 +65,7 @@ infer-out-cmake/report.json: $(CMAKE_DIR) $(CMAKE_SOURCES_DIR)/CMakeLists.txt $(
 	$(QUIET)cd $(CMAKE_ANALYZE_DIR) && \
 	$(call silent_on_success,Testing\
 	  Infer/CMake is immune to UTF-8 in PWD: Makefile generation,\
-	  $(INFER_BIN) -a compile --project-root $(CMAKE_DIR) --results-dir $(CURDIR)/$(@D) -- cmake ..)
+	  $(INFER_BIN) compile --project-root $(CMAKE_DIR) --results-dir $(CURDIR)/$(@D) -- cmake ..)
 	$(QUIET)cd $(CMAKE_ANALYZE_DIR) && \
 	$(call silent_on_success,Testing\
 	  Infer/CMake is immune to UTF-8 in PWD: Makefile execution,\
@@ -91,8 +91,8 @@ infer-out-make/report.json: $(CLANG_DEPS) $(MAKE_DIR)
 	  $(INFER_BIN) -a $(ANALYZER) --results-dir $(CURDIR)/$(@D) -- \
 	    make clean all)
 
-issues-%.exp.test: infer-out-%/report.json $(INFERPRINT_BIN)
-	$(QUIET)$(INFERPRINT_BIN) -q -a $(ANALYZER) $(INFERPRINT_OPTIONS) $@ --from-json-report $<
+issues-%.exp.test: infer-out-%/report.json $(INFER_BIN)
+	$(QUIET)$(INFER_BIN) report -q -a $(ANALYZER) $(INFERPRINT_OPTIONS) $@ --from-json-report $<
 
 issues.exp.test: issues-cmake.exp.test issues-gradle.exp.test issues-javac.exp.test \
                  issues-make.exp.test

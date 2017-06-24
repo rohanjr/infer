@@ -18,22 +18,12 @@ module F = Format;
 
 /** Create tasks to analyze an execution environment */
 let analyze_exe_env_tasks cluster exe_env :Tasks.t => {
-  L.log_progress_file ();
+  L.progressbar_file ();
   Specs.clear_spec_tbl ();
   Random.self_init ();
-  if Config.checkers {
-    /* run the checkers only */
-    Tasks.create [
-      fun () => {
-        let call_graph = Exe_env.get_cg exe_env;
-        Callbacks.iterate_callbacks call_graph exe_env;
-        if Config.write_html {
-          Printer.write_all_html_files cluster
-        }
-      }
-    ]
-  } else {
-    /* run the full analysis */
+  let biabduction_only = Config.equal_analyzer Config.analyzer Config.BiAbduction;
+  if biabduction_only {
+    /* run the biabduction analysis only */
     Tasks.create
       (Interproc.do_analysis_closures exe_env)
       continuation::(
@@ -52,6 +42,17 @@ let analyze_exe_env_tasks cluster exe_env :Tasks.t => {
           None
         }
       )
+  } else {
+    /* run the registered checkers */
+    Tasks.create [
+      fun () => {
+        let call_graph = Exe_env.get_cg exe_env;
+        Callbacks.iterate_callbacks call_graph exe_env;
+        if Config.write_html {
+          Printer.write_all_html_files cluster
+        }
+      }
+    ]
   }
 };
 
@@ -61,7 +62,8 @@ let analyze_cluster_tasks cluster_num (cluster: Cluster.t) :Tasks.t => {
   let exe_env = Exe_env.from_cluster cluster;
   let defined_procs = Cg.get_defined_nodes (Exe_env.get_cg exe_env);
   let num_procs = List.length defined_procs;
-  L.err "@.Processing cluster #%d with %d procedures@." (cluster_num + 1) num_procs;
+  L.(debug Analysis Medium)
+    "@\nProcessing cluster #%d with %d procedures@." (cluster_num + 1) num_procs;
   analyze_exe_env_tasks cluster exe_env
 };
 
@@ -81,29 +83,29 @@ let output_json_makefile_stats clusters => {
 
 let process_cluster_cmdline fname =>
   switch (Cluster.load_from_file (DB.filename_from_string fname)) {
-  | None => L.err "Cannot find cluster file %s@." fname
+  | None => L.internal_error "Cannot find cluster file %s@." fname
   | Some (nr, cluster) => analyze_cluster (nr - 1) cluster
   };
 
-let print_stdout_legend () => {
-  L.stdout "Starting analysis...@\n";
-  L.stdout "@\n";
-  L.stdout "legend:@\n";
-  L.stdout "  \"%s\" analyzing a file@\n" Config.log_analysis_file;
-  L.stdout "  \"%s\" analyzing a procedure@\n" Config.log_analysis_procedure;
+let print_legend () => {
+  L.progress "Starting analysis...@\n";
+  L.progress "@\n";
+  L.progress "legend:@.";
+  L.progress "  \"%s\" analyzing a file@\n" Config.log_analysis_file;
+  L.progress "  \"%s\" analyzing a procedure@\n" Config.log_analysis_procedure;
   if (Config.stats_mode || Config.debug_mode) {
-    L.stdout "  \"%s\" analyzer crashed@\n" Config.log_analysis_crash;
-    L.stdout
+    L.progress "  \"%s\" analyzer crashed@\n" Config.log_analysis_crash;
+    L.progress
       "  \"%s\" timeout: procedure analysis took too much time@\n"
       Config.log_analysis_wallclock_timeout;
-    L.stdout
+    L.progress
       "  \"%s\" timeout: procedure analysis took too many symbolic execution steps@\n"
       Config.log_analysis_symops_timeout;
-    L.stdout
+    L.progress
       "  \"%s\" timeout: procedure analysis took too many recursive iterations@\n"
       Config.log_analysis_recursion_timeout
   };
-  L.stdout "@\n@?"
+  L.progress "@\n@?"
 };
 
 let cluster_should_be_analyzed cluster => {
@@ -113,7 +115,7 @@ let cluster_should_be_analyzed cluster => {
   let check_modified () => {
     let modified = DB.file_was_updated_after_start (DB.filename_from_string fname);
     if (modified && Config.developer_mode) {
-      L.stdout "Modified: %s@." fname
+      L.progress "Modified: %s@." fname
     };
     modified
   };
@@ -136,7 +138,6 @@ let main makefile => {
   switch Config.cluster_cmdline {
   | Some fname => process_cluster_cmdline fname
   | None =>
-    print_stdout_legend ();
     if Config.allow_specs_cleanup {
       DB.Results_dir.clean_specs_dir ()
     };
@@ -145,19 +146,37 @@ let main makefile => {
     };
     let all_clusters = DB.find_source_dirs ();
     let clusters_to_analyze = List.filter f::cluster_should_be_analyzed all_clusters;
-    L.stdout
-      "Found %d (out of %d) source files to be analyzed in %s@."
-      (List.length clusters_to_analyze)
-      (List.length all_clusters)
+    let n_clusters_to_analyze = List.length clusters_to_analyze;
+    L.progress
+      "Found %d%s source file%s to analyze in %s@."
+      n_clusters_to_analyze
+      (
+        if (Config.reactive_mode || Option.is_some Ondemand.dirs_to_analyze) {
+          " (out of " ^ string_of_int (List.length all_clusters) ^ ")"
+        } else {
+          ""
+        }
+      )
+      (
+        if (Int.equal n_clusters_to_analyze 1) {
+          ""
+        } else {
+          "s"
+        }
+      )
       Config.results_dir;
     let is_java () =>
       List.exists
         f::(fun cl => DB.string_crc_has_extension ext::"java" (DB.source_dir_to_string cl))
         all_clusters;
+    if Config.print_active_checkers {
+      L.result "Active checkers: %a@." RegisterCheckers.pp_active_checkers ()
+    };
+    print_legend ();
     if (Config.per_procedure_parallelism && not (is_java ())) {
       /* Java uses ZipLib which is incompatible with forking */
       /* per-procedure parallelism */
-      L.stdout "per-procedure parallelism jobs:%d@." Config.jobs;
+      L.environment_info "Per-procedure parallelism jobs: %d@." Config.jobs;
       if (makefile != "") {
         ClusterMakefile.create_cluster_makefile [] makefile
       };
@@ -177,8 +196,20 @@ let main makefile => {
     } else {
       /* This branch is reached when -j 1 is used */
       List.iteri f::analyze_cluster clusters_to_analyze;
-      L.stdout "@\nAnalysis finished in %as@." Pp.elapsed_time ()
+      L.progress "@\nAnalysis finished in %as@." Pp.elapsed_time ()
     };
     output_json_makefile_stats clusters_to_analyze
   }
+};
+
+let register_perf_stats_report () => {
+  let stats_dir = Filename.concat Config.results_dir Config.backend_stats_dir_name;
+  let cluster =
+    switch Config.cluster_cmdline {
+    | Some cl => "_" ^ cl
+    | None => ""
+    };
+  let stats_base = Config.perf_stats_prefix ^ Filename.basename cluster ^ ".json";
+  let stats_file = Filename.concat stats_dir stats_base;
+  PerfStats.register_report_at_exit stats_file
 };

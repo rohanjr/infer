@@ -78,9 +78,7 @@ struct
 
   let diff : t -> t -> Itv.astate
     = fun arr1 arr2 ->
-      let i1 = Itv.mult arr1.offset arr1.stride in
-      let i2 = Itv.mult arr2.offset arr2.stride in
-      Itv.minus i1 i2
+      Itv.minus arr1.offset arr2.offset
 
   let subst : t -> Itv.Bound.t Itv.SubstMap.t -> t
     = fun arr subst_map ->
@@ -116,19 +114,7 @@ struct
     = fun arr1 arr2 -> { arr1 with offset = Itv.prune_ne arr1.offset arr2.offset }
 end
 
-module PPMap =
-struct
-  include PrettyPrintable.MakePPMap (struct
-      include Allocsite
-      let pp_key f k = pp f k
-    end)
-
-  let pp ~pp_value fmt m =
-    let pp_item fmt (k, v) = F.fprintf fmt "(%a, %a)" pp_key k pp_value v in
-    PrettyPrintable.pp_collection ~pp_item fmt (bindings m)
-end
-
-include AbstractDomain.Map (PPMap) (ArrInfo)
+include AbstractDomain.Map (Allocsite) (ArrInfo)
 
 let bot : astate
   = empty
@@ -165,7 +151,7 @@ let diff : astate -> astate -> Itv.t
     let diff_join k a2 acc =
       match find k arr1 with
       | a1 -> Itv.join acc (ArrInfo.diff a1 a2)
-      | exception Not_found -> acc
+      | exception Not_found -> Itv.top
     in
     fold diff_join arr2 Itv.bot
 

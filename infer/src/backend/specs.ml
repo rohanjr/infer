@@ -152,7 +152,7 @@ let visited_str vis =
        begin
        let ss = ref "" in
        List.iter ~f:(fun n -> ss := !ss ^ " " ^ string_of_int n) ns;
-       L.err "Node %d has lines %s@." node !ss
+       L.out "Node %d has lines %s@." node !ss
        end; *)
     List.iter ~f:(fun n -> lines := Int.Set.add !lines n) ns in
   Visitedset.iter do_one vis;
@@ -303,11 +303,10 @@ type stats =
     call_stats : call_stats;
   }
 
-type status = Initialized | Active | Analyzed [@@deriving compare]
+type status = Pending | Analyzed [@@deriving compare]
 
 let string_of_status = function
-  | Initialized -> "Initialized"
-  | Active -> "Active"
+  | Pending -> "Pending"
   | Analyzed -> "Analyzed"
 
 let pp_status fmt status =
@@ -328,6 +327,7 @@ type payload =
     crashcontext_frame: Stacktree_t.stacktree option;
     (** Proc location and blame_range info for crashcontext analysis *)
     quandary : QuandarySummary.t option;
+    resources : ResourceLeakDomain.summary option;
     siof : SiofDomain.astate option;
     threadsafety : ThreadSafetyDomain.summary option;
     buffer_overrun : BufferOverrunDomain.Summary.t option;
@@ -350,17 +350,12 @@ let spec_tbl: spec_tbl = Typ.Procname.Hash.create 128
 
 let clear_spec_tbl () = Typ.Procname.Hash.clear spec_tbl
 
-(** pretty print analysis time; if [whole_seconds] is true, only print time in seconds *)
-let pp_time whole_seconds fmt t =
-  if whole_seconds then F.fprintf fmt "%3.0f s" t
-  else F.fprintf fmt "%f s" t
-
 let pp_failure_kind_opt fmt failure_kind_opt = match failure_kind_opt with
   | Some failure_kind -> SymOp.pp_failure_kind fmt failure_kind
   | None -> F.fprintf fmt "NONE"
 
 let pp_errlog fmt err_log =
-  F.fprintf fmt "ERRORS: @[<h>%a@]@." Errlog.pp_errors err_log;
+  F.fprintf fmt "ERRORS: @[<h>%a@]@\n%!" Errlog.pp_errors err_log;
   F.fprintf fmt "WARNINGS: @[<h>%a@]" Errlog.pp_warnings err_log
 
 let pp_stats fmt stats =
@@ -446,7 +441,7 @@ let pp_payload pe fmt
     { preposts; typestate; crashcontext_frame;
       quandary; siof; threadsafety; buffer_overrun; annot_map } =
   let pp_opt prefix pp fmt = function
-    | Some x -> F.fprintf fmt "%s: %a\n" prefix pp x
+    | Some x -> F.fprintf fmt "%s: %a@\n" prefix pp x
     | None -> () in
   F.fprintf fmt "%a%a%a%a%a%a%a%a@\n"
     (pp_opt "PrePosts" (pp_specs pe)) (Option.map ~f:NormSpec.tospecs preposts)
@@ -514,7 +509,7 @@ let summary_compact sh summary =
 
 (** Add the summary to the table for the given function *)
 let add_summary (proc_name : Typ.Procname.t) (summary: summary) : unit =
-  L.out "Adding summary for %a@\n@[<v 2>  %a@]@."
+  L.(debug Analysis Medium) "Adding summary for %a@\n@[<v 2>  %a@]@."
     Typ.Procname.pp proc_name
     pp_summary_text summary;
   Typ.Procname.Hash.replace spec_tbl proc_name summary
@@ -645,9 +640,6 @@ let summary_exists proc_name =
 let get_status summary =
   summary.status
 
-let is_active summary =
-  equal_status (get_status summary) Active
-
 let get_proc_name summary =
   summary.attributes.ProcAttributes.proc_name
 
@@ -685,12 +677,6 @@ let store_summary (summ1: summary) =
     (res_dir_specs_filename proc_name)
     ~data:final_summary
 
-(** Set the current status for the proc *)
-let set_status proc_name status =
-  match get_summary proc_name with
-  | None -> raise (Failure ("Specs.set_status: " ^ (Typ.Procname.to_string proc_name) ^ " Not_found"))
-  | Some summary -> add_summary proc_name { summary with status = status }
-
 let empty_payload =
   {
     preposts = None;
@@ -698,6 +684,7 @@ let empty_payload =
     annot_map = None;
     crashcontext_frame = None;
     quandary = None;
+    resources = None;
     siof = None;
     threadsafety = None;
     buffer_overrun = None;
@@ -718,7 +705,7 @@ let init_summary
       sessions = ref 0;
       payload = empty_payload;
       stats = empty_stats calls;
-      status = Initialized;
+      status = Pending;
       attributes =
         { proc_attributes with
           ProcAttributes.proc_flags = proc_flags; };
@@ -727,18 +714,26 @@ let init_summary
   Typ.Procname.Hash.replace spec_tbl proc_attributes.ProcAttributes.proc_name summary;
   summary
 
-(** Reset a summary rebuilding the dependents and preserving the proc attributes if present. *)
-let reset_summary proc_name attributes_opt proc_desc_option =
-  let proc_attributes = match attributes_opt with
-    | Some attributes ->
-        attributes
-    | None ->
-        ProcAttributes.default proc_name !Config.curr_language in
+let dummy =
   init_summary (
     [],
     ProcAttributes.proc_flags_empty (),
     [],
-    proc_attributes,
+    ProcAttributes.default Typ.Procname.empty_block Config.Java,
+    None
+  )
+
+(** Reset a summary rebuilding the dependents and preserving the proc attributes if present. *)
+let reset_summary proc_desc =
+  let proc_desc_option =
+    if Config.dynamic_dispatch = `Lazy
+    then Some proc_desc
+    else None in
+  init_summary (
+    [],
+    ProcAttributes.proc_flags_empty (),
+    [],
+    Procdesc.get_attributes proc_desc,
     proc_desc_option
   )
 

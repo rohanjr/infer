@@ -27,6 +27,13 @@ module Raw : sig
       original access path if the access list is empty *)
   val truncate : t -> t
 
+  (** get the last access in the list. returns None if the list is empty *)
+  val get_last_access : t -> access option
+
+  (** get the field name and the annotation of the last access in the list of accesses if
+      the list is non-empty and the last access is a field access *)
+  val get_field_and_annotation : t -> Tenv.t -> (Fieldname.t * Annot.Item.t) option
+
   (** get the typ of the last access in the list of accesses if the list is non-empty, or the base
       if the list is empty. that is, for x.f.g, return typ(g), and for x, return typ(x) *)
   val get_typ : t -> Tenv.t -> Typ.t option
@@ -66,6 +73,13 @@ val of_exp : Exp.t -> Typ.t -> f_resolve_id:(Var.t -> Raw.t option) -> Raw.t lis
 
 (** convert [lhs_exp] to a raw access path, resolving identifiers using [f_resolve_id] *)
 val of_lhs_exp : Exp.t -> Typ.t -> f_resolve_id:(Var.t -> Raw.t option) -> Raw.t option
+
+(** replace the base var with a footprint variable rooted at formal index [formal_index] *)
+val to_footprint : int -> t -> t
+
+(** return the formal index associated with the base of this access path if there is one, or None
+    otherwise *)
+val get_footprint_index : t -> int option
 
 (** append new accesses to an existing access path; e.g., `append_access x.f [g, h]` produces
     `x.f.g.h` *)

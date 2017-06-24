@@ -79,19 +79,6 @@ type fkind =
   | FLongDouble /** [long double] */
 [@@deriving compare];
 
-
-/** comparison for fkind */
-let fkind_compare k1 k2 =>
-  switch (k1, k2) {
-  | (FFloat, FFloat) => 0
-  | (FFloat, _) => (-1)
-  | (_, FFloat) => 1
-  | (FDouble, FDouble) => 0
-  | (FDouble, _) => (-1)
-  | (_, FDouble) => 1
-  | (FLongDouble, FLongDouble) => 0
-  };
-
 let fkind_to_string =
   fun
   | FFloat => "float"
@@ -118,10 +105,6 @@ let ptr_kind_string =
   | Pk_objc_unsafe_unretained => "__unsafe_unretained *"
   | Pk_objc_autoreleasing => "__autoreleasing *";
 
-
-/** statically determined length of an array type, if any */
-type static_length = option IntLit.t [@@deriving compare];
-
 module T = {
   type type_quals = {is_const: bool, is_restrict: bool, is_volatile: bool} [@@deriving compare];
 
@@ -134,7 +117,8 @@ module T = {
     | Tfun bool /** function type with noreturn attribute */
     | Tptr t ptr_kind /** pointer type */
     | Tstruct name /** structured value type name */
-    | Tarray t static_length /** array type with statically fixed length */
+    | TVar string /** type variable (ie. C++ template variables) */
+    | Tarray t (option IntLit.t) (option IntLit.t) /** array type with statically fixed length and stride */
   [@@deriving compare]
   and name =
     | CStruct QualifiedCppName.t
@@ -207,6 +191,7 @@ let rec pp_full pe f typ => {
   let pp_desc f {desc} =>
     switch desc {
     | Tstruct tname => F.fprintf f "%a" (pp_name_c_syntax pe) tname
+    | TVar name => F.fprintf f "%s" name
     | Tint ik => F.fprintf f "%s" (ikind_to_string ik)
     | Tfloat fk => F.fprintf f "%s" (fkind_to_string fk)
     | Tvoid => F.fprintf f "void"
@@ -215,13 +200,13 @@ let rec pp_full pe f typ => {
     | Tptr ({desc: Tarray _ | Tfun _} as typ) pk =>
       F.fprintf f "%a(%s)" (pp_full pe) typ (ptr_kind_string pk |> escape pe)
     | Tptr typ pk => F.fprintf f "%a%s" (pp_full pe) typ (ptr_kind_string pk |> escape pe)
-    | Tarray typ static_len =>
-      let pp_array_static_len fmt => (
+    | Tarray typ static_len static_stride =>
+      let pp_int_opt fmt => (
         fun
-        | Some static_len => IntLit.pp fmt static_len
+        | Some x => IntLit.pp fmt x
         | None => F.fprintf fmt "_"
       );
-      F.fprintf f "%a[%a]" (pp_full pe) typ pp_array_static_len static_len
+      F.fprintf f "%a[%a*%a]" (pp_full pe) typ pp_int_opt static_len pp_int_opt static_stride
     };
   F.fprintf f "%a%a" pp_desc typ pp_quals typ
 }
@@ -273,6 +258,14 @@ module Name = {
         let template_suffix = F.asprintf "%a" (pp_template_spec_info Pp.text) templ_args;
         QualifiedCppName.append_template_args_to_last name args::template_suffix
       }
+    | JavaClass _ => QualifiedCppName.empty;
+  let unqualified_name =
+    fun
+    | CStruct name
+    | CUnion name
+    | ObjcClass name
+    | ObjcProtocol name => name
+    | CppClass name _ => name
     | JavaClass _ => QualifiedCppName.empty;
   let name n =>
     switch n {
@@ -381,7 +374,7 @@ let unsome s =>
   fun
   | Some default_typ => default_typ
   | None => {
-      L.err "No default typ in %s@." s;
+      L.internal_error "No default typ in %s@." s;
       assert false
     };
 
@@ -398,7 +391,7 @@ let strip_ptr typ =>
     If not, return the default type if given, otherwise raise an exception */
 let array_elem default_opt typ =>
   switch typ.desc {
-  | Tarray t_el _ => t_el
+  | Tarray t_el _ _ => t_el
   | _ => unsome "array_elem" default_opt
   };
 
@@ -416,7 +409,7 @@ let is_java_class = is_class_of_kind Name.Java.is_class;
 
 let rec is_array_of_cpp_class typ =>
   switch typ.desc {
-  | Tarray typ _ => is_array_of_cpp_class typ
+  | Tarray typ _ _ => is_array_of_cpp_class typ
   | _ => is_cpp_class typ
   };
 
@@ -452,11 +445,11 @@ let rec java_from_string: string => t =
   | "double" => mk (Tfloat FDouble)
   | typ_str when String.contains typ_str '[' => {
       let stripped_typ = String.sub typ_str pos::0 len::(String.length typ_str - 2);
-      mk (Tptr (mk (Tarray (java_from_string stripped_typ) None)) Pk_pointer)
+      mk (Tptr (mk (Tarray (java_from_string stripped_typ) None None)) Pk_pointer)
     }
   | typ_str => mk (Tstruct (Name.Java.from_string typ_str));
 
-type typ = t [@@deriving compare];
+type typ = t;
 
 module Procname = {
   /* e.g. ("", "int") for primitive types or ("java.io", "PrintWriter") for objects */
@@ -697,6 +690,10 @@ module Procname = {
   let java_is_lambda =
     fun
     | Java j => String.is_prefix prefix::"lambda$" j.method_name
+    | _ => false;
+  let java_is_generated =
+    fun
+    | Java j => String.is_prefix prefix::"$" j.method_name
     | _ => false;
 
   /** Prints a string of a java procname with the given level of verbosity */
@@ -1050,19 +1047,19 @@ module Struct = {
       /* change false to true to print the details of struct */
       F.fprintf
         f
-        "%a \n\tfields: {%a\n\t}\n\tsupers: {%a\n\t}\n\tmethods: {%a\n\t}\n\tannots: {%a\n\t}"
+        "%a @\n\tfields: {%a@\n\t}@\n\tsupers: {%a@\n\t}@\n\tmethods: {%a@\n\t}@\n\tannots: {%a@\n\t}"
         Name.pp
         name
         (
           Pp.seq (
             fun f (fld, t, a) =>
-              F.fprintf f "\n\t\t%a %a %a" (pp_full pe) t Fieldname.pp fld Annot.Item.pp a
+              F.fprintf f "@\n\t\t%a %a %a" (pp_full pe) t Fieldname.pp fld Annot.Item.pp a
           )
         )
         fields
-        (Pp.seq (fun f n => F.fprintf f "\n\t\t%a" Name.pp n))
+        (Pp.seq (fun f n => F.fprintf f "@\n\t\t%a" Name.pp n))
         supers
-        (Pp.seq (fun f m => F.fprintf f "\n\t\t%a" Procname.pp m))
+        (Pp.seq (fun f m => F.fprintf f "@\n\t\t%a" Procname.pp m))
         methods
         Annot.Item.pp
         annots
@@ -1091,7 +1088,7 @@ module Struct = {
   /** the element typ of the final extensible array in the given typ, if any */
   let rec get_extensible_array_element_typ ::lookup (typ: T.t) =>
     switch typ.desc {
-    | Tarray typ _ => Some typ
+    | Tarray typ _ _ => Some typ
     | Tstruct name =>
       switch (lookup name) {
       | Some {fields} =>

@@ -7,9 +7,11 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *)
 
+(** This module creates extra ast constructs that are needed for the translation *)
+
 open! IStd
 
-(** This module creates extra ast constructs that are needed for the translation *)
+module L = Logging
 
 let dummy_source_range () =
   let dummy_source_loc = {
@@ -405,7 +407,8 @@ let translate_block_enumerate block_name stmt_info stmt_list ei =
         let parameter = Clang_ast_t.UnaryExprOrTypeTraitExpr
             ((fresh_stmt_info stmt_info), [],
              make_general_expr_info create_unsigned_long_type `RValue `Ordinary,
-             { Clang_ast_t.uttei_kind = `SizeOf 1; Clang_ast_t.uttei_qual_type = type_opt}) in
+             {Clang_ast_t.uttei_kind = `SizeOfWithSize 1;
+              Clang_ast_t.uttei_qual_type = type_opt}) in
         let pointer = di.Clang_ast_t.di_pointer in
         let stmt_info = fresh_stmt_info stmt_info in
         let malloc_name = CAst_utils.make_name_decl CFrontend_config.malloc in
@@ -561,11 +564,16 @@ let translate_block_enumerate block_name stmt_info stmt_list ei =
       let translated_stmt, op = translate bdi.bdi_parameters s block_decl bei.ei_qual_type in
       CompoundStmt (stmt_info, translated_stmt), vars_to_register @ op @ bv
   | _ -> (* When it is not the method we expect with only one parameter, we don't translate *)
-      Logging.out_debug "WARNING: Block Enumeration called at %s not translated."
+      L.(debug Capture Verbose) "WARNING: Block Enumeration called at %s not translated."
         (Clang_ast_j.string_of_stmt_info stmt_info);
       CompoundStmt (stmt_info, stmt_list), []
 
-(* We translate the logical negation of an integer with a conditional*)
+(* We translate an expression with a conditional*)
+(* x <=> x?1:0 *)
+let trans_with_conditional stmt_info expr_info stmt_list =
+  let stmt_list_cond = stmt_list @ [create_integer_literal "1"] @ [create_integer_literal "0"] in
+  Clang_ast_t.ConditionalOperator (stmt_info, stmt_list_cond, expr_info)
+(* We translate the logical negation of an expression with a conditional*)
 (* !x <=> x?0:1 *)
 let trans_negation_with_conditional stmt_info expr_info stmt_list =
   let stmt_list_cond = stmt_list @ [create_integer_literal "0"] @ [create_integer_literal "1"] in

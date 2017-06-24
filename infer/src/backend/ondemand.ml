@@ -47,11 +47,17 @@ let unset_callbacks () =
 
 let nesting = ref 0
 
+let is_active, add_active, remove_active =
+  let currently_analyzed = ref Typ.Procname.Set.empty in
+  let is_active proc_name =
+    Typ.Procname.Set.mem proc_name !currently_analyzed
+  and add_active proc_name =
+    currently_analyzed := Typ.Procname.Set.add proc_name !currently_analyzed
+  and remove_active proc_name =
+    currently_analyzed := Typ.Procname.Set.remove proc_name !currently_analyzed in
+  (is_active, add_active, remove_active)
+
 let should_be_analyzed proc_name proc_attributes =
-  let currently_analyzed () =
-    match Specs.get_summary proc_name with
-    | None -> false
-    | Some summary -> Specs.is_active summary in
   let already_analyzed () =
     match Specs.get_summary proc_name with
     | Some summary ->
@@ -59,11 +65,11 @@ let should_be_analyzed proc_name proc_attributes =
     | None ->
         false in
   proc_attributes.ProcAttributes.is_defined && (* we have the implementation *)
-  not (currently_analyzed ()) && (* avoid infinite loops *)
+  not (is_active proc_name) && (* avoid infinite loops *)
   not (already_analyzed ()) (* avoid re-analysis of the same procedure *)
 
 let procedure_should_be_analyzed proc_name =
-  match AttributesTable.load_attributes ~cache:true proc_name with
+  match Specs.proc_resolve_attributes proc_name with
   | Some proc_attributes when Config.reactive_capture && not proc_attributes.is_defined ->
       (* try to capture procedure first *)
       let defined_proc_attributes = OndemandCapture.try_capture proc_attributes in
@@ -116,43 +122,38 @@ let run_proc_analysis ~propagate_exceptions analyze_proc curr_pdesc callee_pdesc
     let start_time = Unix.gettimeofday () in
     fun () ->
       let elapsed_time = Unix.gettimeofday () -. start_time in
-      L.out "Elapsed analysis time: %a: %f\n"
+      L.(debug Analysis Medium) "Elapsed analysis time: %a: %f@\n"
         Typ.Procname.pp callee_pname
         elapsed_time in
 
-  (* Dot means start of a procedure *)
-  L.log_progress_procedure ();
-  if Config.trace_ondemand then L.stderr "[%d] run_proc_analysis %a -> %a@."
+  L.progressbar_procedure ();
+  if Config.trace_ondemand then L.progress "[%d] run_proc_analysis %a -> %a@."
       !nesting
       Typ.Procname.pp curr_pname
       Typ.Procname.pp callee_pname;
 
   let preprocess () =
     incr nesting;
-    let attributes_opt =
-      Specs.proc_resolve_attributes callee_pname in
-    let callee_pdesc_option =
-      if Config.dynamic_dispatch = `Lazy
-      then Some callee_pdesc
-      else None in
-    let initial_summary = Specs.reset_summary callee_pname attributes_opt callee_pdesc_option in
-    Specs.set_status callee_pname Specs.Active;
+    let initial_summary = Specs.reset_summary callee_pdesc in
+    add_active callee_pname;
     initial_summary in
 
   let postprocess summary =
     decr nesting;
     Specs.store_summary summary;
+    remove_active callee_pname;
     Printer.write_proc_html callee_pdesc;
     log_elapsed_time ();
     summary in
 
   let log_error_and_continue exn summary kind =
-    Reporting.log_error_from_summary summary exn;
+    Reporting.log_error summary exn;
     let stats = { summary.Specs.stats with Specs.stats_failure = Some kind } in
     let payload =
       { summary.Specs.payload with Specs.preposts = Some []; } in
     let new_summary = { summary with Specs.stats; payload } in
     Specs.store_summary new_summary;
+    remove_active callee_pname;
     log_elapsed_time ();
     new_summary in
 
@@ -165,7 +166,7 @@ let run_proc_analysis ~propagate_exceptions analyze_proc curr_pdesc callee_pdesc
     restore_global_state old_state;
     summary
   with exn ->
-    L.stderr "@.ONDEMAND EXCEPTION %a %s@.@.BACK TRACE@.%s@?"
+    L.internal_error "@\nONDEMAND EXCEPTION %a %s@.@.BACK TRACE@.%s@?"
       Typ.Procname.pp callee_pname
       (Exn.to_string exn)
       (Printexc.get_backtrace ());
@@ -217,7 +218,7 @@ let analyze_proc_name ~propagate_exceptions curr_pdesc callee_pname : Specs.summ
           match callbacks.get_proc_desc callee_pname with
           | Some callee_pdesc ->
               analyze_proc_desc ~propagate_exceptions curr_pdesc callee_pdesc
-          | None -> None
+          | None -> Specs.get_summary callee_pname
         end
       else
         Specs.get_summary callee_pname

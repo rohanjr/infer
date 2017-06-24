@@ -8,6 +8,8 @@
  */
 open! IStd;
 
+module L = Logging;
+
 type t = {
   exec: string,
   argv: list string,
@@ -29,7 +31,7 @@ let plugin_name = "BiniouASTExporter";
 
 
 /** whether to amend include search path with C++ model headers */
-let infer_cxx_models = Config.cxx;
+let infer_cxx_models = Config.cxx_infer_headers;
 
 let value_of_argv_option argv opt_name =>
   List.fold
@@ -57,7 +59,7 @@ let can_attach_ast_exporter cmd => {
   let is_supported_language cmd =>
     switch (value_of_option cmd "-x") {
     | None =>
-      Logging.stderr "malformed -cc1 command has no \"-x\" flag!";
+      L.external_warning "malformed -cc1 command has no \"-x\" flag!";
       false
     | Some lang when String.is_prefix prefix::"assembler" lang => false
     | Some _ => true
@@ -89,6 +91,7 @@ let include_override_regex = Option.map f::Str.regexp Config.clang_include_to_ov
 let clang_cc1_cmd_sanitizer cmd => {
   /* command line options not supported by the opensource compiler or the plugins */
   let flags_blacklist = ["-fembed-bitcode-marker", "-fno-canonical-system-headers"];
+  let mllvm_flags_blacklist = ["-profile-guided-section-prefix"];
   let replace_option_arg option arg =>
     if (String.equal option "-arch" && String.equal arg "armv7k") {
       "armv7"
@@ -115,8 +118,15 @@ let clang_cc1_cmd_sanitizer cmd => {
     } else {
       arg
     };
+  let args_defines =
+    if Config.bufferoverrun {
+      ["-D__INFER_BUFFEROVERRUN"]
+    } else {
+      []
+    };
   let post_args_rev =
     [] |> List.rev_append ["-include", Config.lib_dir ^\/ "clang_wrappers" ^\/ "global_defines.h"] |>
+    List.rev_append args_defines |>
     /* Never error on warnings. Clang is often more strict than Apple's version.  These arguments
        are appended at the end to override previous opposite settings.  How it's done: suppress
        all the warnings, since there are no warnings, compiler can't elevate them to error
@@ -126,9 +136,14 @@ let clang_cc1_cmd_sanitizer cmd => {
     fun
     | [] =>
       /* return non-reversed list */
-      List.rev (post_args_rev @ res_rev)
+      List.rev_append res_rev (List.rev post_args_rev)
     | [flag, ...tl] when List.mem equal::String.equal flags_blacklist flag =>
       filter_unsupported_args_and_swap_includes (flag, res_rev) tl
+    | [flag1, flag2, ...tl]
+        when
+          String.equal "-mllvm" flag1 &&
+          List.exists f::(fun prefix => String.is_prefix ::prefix flag2) mllvm_flags_blacklist =>
+      filter_unsupported_args_and_swap_includes (flag2, res_rev) tl
     | [arg, ...tl] => {
         let res_rev' = [replace_option_arg prev arg, ...res_rev];
         filter_unsupported_args_and_swap_includes (arg, res_rev') tl

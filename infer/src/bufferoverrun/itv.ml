@@ -50,6 +50,9 @@ struct
   let empty : t
     = M.empty
 
+  let is_empty : t -> bool
+    = M.is_empty
+
   let add : Symbol.t -> int -> t -> t
     = M.add
 
@@ -186,7 +189,6 @@ let pp_min_max : F.formatter -> min_max_t -> unit
     | Min -> F.fprintf fmt "min"
     | Max -> F.fprintf fmt "max"
 
-
 let pp : F.formatter -> t -> unit
   = fun fmt -> function
     | MInf -> F.fprintf fmt "-oo"
@@ -204,13 +206,21 @@ let pp : F.formatter -> t -> unit
 let of_int : int -> t
   = fun n -> Linear (n, SymLinear.empty)
 
+let zero = of_int 0
+
+let one = of_int 1
+
+let minus_one = of_int ~-1
+
+let _255 = of_int 255
+
 let of_sym : SymLinear.t -> t
   = fun s -> Linear (0, s)
 
 let is_symbolic : t -> bool
   = function
     | MInf | PInf | Bot -> false
-    | Linear (_, se) -> SymLinear.cardinal se > 0
+    | Linear (_, se) -> not (SymLinear.is_empty se)
     | MinMax _ -> true
 
 let opt_lift : ('a -> 'b -> bool) -> 'a option -> 'b option -> bool
@@ -533,8 +543,15 @@ struct
   let pp : F.formatter -> t -> unit
     = fun fmt (l, u) -> F.fprintf fmt "[%a, %a]" Bound.pp l Bound.pp u
 
-  let of_int : int -> t
-    = fun n -> (Bound.of_int n, Bound.of_int n)
+  let of_bound bound = (bound, bound)
+
+  let of_int n = of_bound (Bound.of_int n)
+
+  let of_int_lit : IntLit.t -> t option
+    = fun s ->
+      match IntLit.to_int s with
+      | size -> Some (of_int size)
+      | exception _ -> None
 
   let get_new_sym : Typ.Procname.t -> t
     = fun pname ->
@@ -542,35 +559,34 @@ struct
       let upper = Bound.of_sym (SymLinear.get_new pname) in
       (lower, upper)
 
-  let make_sym : Typ.Procname.t -> int -> t
-    = fun pname i ->
-      let lower = Bound.of_sym (SymLinear.make pname i) in
-      let upper = Bound.of_sym (SymLinear.make pname (i+1)) in
+  let make_sym : unsigned:bool -> Typ.Procname.t -> (unit -> int) -> t
+    = fun ~unsigned pname new_sym_num ->
+      let lower =
+        if unsigned then
+          Bound.MinMax (Bound.Max, 0, Symbol.make pname (new_sym_num ()))
+        else
+          Bound.of_sym (SymLinear.make pname (new_sym_num ()))
+      in
+      let upper = Bound.of_sym (SymLinear.make pname (new_sym_num ())) in
       (lower, upper)
 
-  let top : t
-    = (Bound.MInf, Bound.PInf)
+  let m1_255 = (Bound.minus_one, Bound._255)
 
-  let pos : t
-    = (Bound.of_int 1, Bound.PInf)
+  let nat = (Bound.zero, Bound.PInf)
 
-  let nat : t
-    = (Bound.of_int 0, Bound.PInf)
+  let one = of_bound Bound.one
 
-  let zero : t
-    = of_int 0
+  let pos = (Bound.one, Bound.PInf)
 
-  let one : t
-    = of_int 1
+  let top = (Bound.MInf, Bound.PInf)
 
-  let true_sem : t
-    = one
+  let zero = of_bound Bound.zero
 
-  let false_sem : t
-    = zero
+  let true_sem = one
 
-  let unknown_bool : t
-    = (Bound.of_int 0, Bound.of_int 1)
+  let false_sem = zero
+
+  let unknown_bool = join false_sem true_sem
 
   let is_true : t -> bool
     = fun (l, u) -> Bound.le (Bound.of_int 1) l || Bound.le u (Bound.of_int (-1))
@@ -586,6 +602,14 @@ struct
 
   let is_symbolic : t -> bool
     = fun (lb, ub) -> Bound.is_symbolic lb || Bound.is_symbolic ub
+
+  let is_ge_zero : t -> bool
+    = fun (lb, _) ->
+      if lb <> Bound.Bot then Bound.le Bound.zero lb else false
+
+  let is_le_zero : t -> bool
+    = fun (_, ub) ->
+      if ub <> Bound.Bot then Bound.le ub Bound.zero else false
 
   let neg : t -> t
     = fun (l, u) ->
@@ -648,8 +672,13 @@ struct
   let mod_sem : t -> t -> t
     = fun x y ->
       match is_const x, is_const y with
-      | Some n, Some m -> if Int.equal m 0 then x else of_int (n mod m)
-      | _, Some m -> (Bound.of_int (-m), Bound.of_int m)
+      | _, Some 0 -> x
+      | Some n, Some m -> of_int (n mod m)
+      | _, Some m ->
+          let abs_m = abs m in
+          if is_ge_zero x then (Bound.zero, Bound.of_int (abs_m - 1)) else
+          if is_le_zero x then (Bound.of_int (-abs_m + 1), Bound.zero) else
+            (Bound.of_int (-abs_m + 1), Bound.of_int (abs_m - 1))
       | _, None -> top
 
   (* x << [-1,-1] does nothing. *)
@@ -856,6 +885,10 @@ let ub : t -> Bound.t
 let of_int : int -> astate
   = fun n -> NonBottom (ItvPure.of_int n)
 
+let of_int_lit n =
+  try of_int (IntLit.to_int n) with
+  | _ -> top
+
 let is_bot : t -> bool
   = fun x -> equal x Bottom
 
@@ -864,20 +897,21 @@ let is_finite : t -> bool
     | NonBottom x -> ItvPure.is_finite x
     | Bottom -> false
 
-let zero : t
-  = of_int 0
+let false_sem = NonBottom ItvPure.false_sem
 
-let one : t
-  = of_int 1
+let m1_255 = NonBottom ItvPure.m1_255
 
-let pos : t
-  = NonBottom ItvPure.pos
+let nat = NonBottom ItvPure.nat
 
-let nat : t
-  = NonBottom ItvPure.nat
+let one = NonBottom ItvPure.one
 
-let unknown_bool : t
-  = NonBottom ItvPure.unknown_bool
+let pos = NonBottom ItvPure.pos
+
+let true_sem = NonBottom ItvPure.true_sem
+
+let unknown_bool = NonBottom ItvPure.unknown_bool
+
+let zero = NonBottom ItvPure.zero
 
 let make : Bound.t -> Bound.t -> t
   = fun l u -> if Bound.lt u l then Bottom else NonBottom (ItvPure.make l u)
@@ -942,8 +976,8 @@ let minus : t -> t -> t
 let get_new_sym : Typ.Procname.t -> t
   = fun pname -> NonBottom (ItvPure.get_new_sym pname)
 
-let make_sym : Typ.Procname.t -> int -> t
-  = fun pname i -> NonBottom (ItvPure.make_sym pname i)
+let make_sym : ?unsigned:bool -> Typ.Procname.t -> (unit -> int) -> t
+  = fun ?(unsigned=false) pname new_sym_num -> NonBottom (ItvPure.make_sym ~unsigned pname new_sym_num)
 
 let neg : t -> t
   = lift1 ItvPure.neg

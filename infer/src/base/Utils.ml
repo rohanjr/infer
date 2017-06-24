@@ -38,10 +38,10 @@ let read_file fname =
   with
   | End_of_file ->
       cleanup ();
-      Some (List.rev !res)
-  | Sys_error _ ->
+      Ok (List.rev !res)
+  | Sys_error error ->
       cleanup ();
-      None
+      Error error
 
 (** copy a source file, return the number of lines, or None in case of error *)
 let copy_file fname_from fname_to =
@@ -239,15 +239,11 @@ let shell_escape_command cmd =
     |> Printf.sprintf "'%s'" in
   List.map ~f:escape cmd |> String.concat ~sep:" "
 
-let run_command_and_get_output cmd =
-  let shell_escaped_cmd = shell_escape_command cmd in
-  with_process_in (Printf.sprintf "%s 2>&1" shell_escaped_cmd) In_channel.input_lines
-
 (** Create a directory if it does not exist already. *)
 let create_dir dir =
   try
     if (Unix.stat dir).Unix.st_kind <> Unix.S_DIR then
-      failwithf "@.ERROR: file %s exists and is not a directory@." dir
+      failwithf "file %s exists and is not a directory@." dir
   with Unix.Unix_error _ ->
   try Unix.mkdir dir ~perm:0o700 with
     Unix.Unix_error _ ->
@@ -255,11 +251,11 @@ let create_dir dir =
         try Polymorphic_compare.(=) ((Unix.stat dir).Unix.st_kind) Unix.S_DIR
         with Unix.Unix_error _ -> false in
       if not created_concurrently then
-        failwithf "@.ERROR: cannot create directory %s@." dir
+        failwithf "cannot create directory %s@." dir
 
 let realpath_cache = Hashtbl.create 1023
 
-let realpath path =
+let realpath ?(warn_on_error=true) path =
   match Hashtbl.find realpath_cache path with
   | exception Not_found -> (
       match Filename.realpath path with
@@ -267,8 +263,9 @@ let realpath path =
           Hashtbl.add realpath_cache path (Ok realpath);
           realpath
       | exception Unix.Unix_error (code, f, arg) ->
-          F.eprintf
-            "WARNING: Failed to resolve file %s with \"%s\" \n@." arg (Unix.error_message code);
+          if warn_on_error then
+            F.eprintf
+              "WARNING: Failed to resolve file %s with \"%s\" @\n@." arg (Unix.error_message code);
           (* cache failures as well *)
           Hashtbl.add realpath_cache path (Error (code, f, arg));
           raise (Unix.Unix_error (code, f, arg))
@@ -301,77 +298,20 @@ let compare_versions v1 v2 =
   let lv2  = int_list_of_version v2 in
   [%compare : int list] lv1 lv2
 
-(* Run the epilogues when we get SIGINT (Control-C). We do not want to mask SIGINT unless at least
-   one epilogue has been registered, so make this value lazy. *)
-let activate_run_epilogues_on_signal = lazy (
-  let run_epilogues_on_signal s =
-    F.eprintf "*** %s: Caught %s, time to die@." (Filename.basename Sys.executable_name)
-      (Signal.to_string s);
-    (* Epilogues are registered with [at_exit] so exiting will make them run. *)
-    exit 0 in
-  Signal.Expert.handle Signal.int run_epilogues_on_signal
-)
-
-(* Keep track of whether the current execution is in a child process *)
-let in_child = ref false
-
-module ProcessPool = struct
-  type t =
-    {
-      mutable num_processes : int;
-      jobs : int;
-    }
-  let create ~jobs =
-    {
-      num_processes = 0;
-      jobs;
-    }
-
-  let incr counter =
-    counter.num_processes <- counter.num_processes + 1
-
-  let decr counter =
-    counter.num_processes <- counter.num_processes - 1
-
-  let wait counter =
-    let _ = Unix.wait `Any in
-    decr counter
-
-  let wait_all counter =
-    for _ = 1 to counter.num_processes do
-      wait counter
-    done
-
-  let should_wait counter =
-    counter.num_processes >= counter.jobs
-
-  let start_child ~f ~pool x =
-    match Unix.fork () with
-    | `In_the_child ->
-        in_child := true;
-        f x;
-        exit 0
-    | `In_the_parent _pid ->
-        incr pool;
-        if should_wait pool
-        then wait pool
-end
-
-let iteri_parallel ~f ?(jobs=1) l =
-  let pool = ProcessPool.create ~jobs in
-  List.iteri ~f:(fun i x -> ProcessPool.start_child ~f:(f i) ~pool x) l;
-  ProcessPool.wait_all pool
-
-let iter_parallel ~f ?(jobs=1) l =
-  iteri_parallel ~f:(fun _ x -> f x) ~jobs l
-
-let register_epilogue f desc =
-  let f_no_exn () =
-    if not !in_child then
-      try f ()
-      with exn ->
-        F.eprintf "Error while running epilogue %s:@ %a.@ Powering through...@." desc Exn.pp exn in
-  (* We call `exit` in a bunch of places, so register the epilogues with [at_exit]. *)
-  Pervasives.at_exit f_no_exn;
-  (* Register signal masking. *)
-  Lazy.force activate_run_epilogues_on_signal
+let write_file_with_locking ?(delete=false) ~f:do_write fname =
+  Unix.with_file ~mode:Unix.[O_WRONLY; O_CREAT] fname ~f:(fun file_descr ->
+      if Unix.flock file_descr Unix.Flock_command.lock_exclusive then (
+        (* make sure we're not writing over some existing, possibly longer content: some other
+           process may have snagged the file from under us between open(2) and flock(2) so passing
+           O_TRUNC to open(2) above would not be a good substitute for calling ftruncate(2)
+           below. *)
+        Unix.ftruncate file_descr ~len:Int64.zero;
+        let outc = Unix.out_channel_of_descr file_descr in
+        do_write outc;
+        flush outc;
+        ignore (Unix.flock file_descr Unix.Flock_command.unlock)
+      );
+    );
+  if delete then
+    try Unix.unlink fname with
+    | Unix.Unix_error _ -> ()

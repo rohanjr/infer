@@ -35,7 +35,6 @@ BIN_DIRECTORY = os.path.join(INFER_INFER_DIRECTORY, 'bin')
 JAVA_LIB_DIRECTORY = os.path.join(LIB_DIRECTORY, 'java')
 MODELS_JAR = os.path.join(JAVA_LIB_DIRECTORY, 'models.jar')
 WRAPPERS_DIRECTORY = os.path.join(LIB_DIRECTORY, 'wrappers')
-XCODE_WRAPPERS_DIRECTORY = os.path.join(LIB_DIRECTORY, 'xcode_wrappers')
 
 DEFAULT_INFER_OUT = os.path.join(os.getcwd().decode(CODESET), 'infer-out')
 
@@ -52,6 +51,14 @@ LOG_FILE = 'toplevel.log'
 
 BUCK_INFER_OUT = 'infer'
 
+BUCK_OUT = 'buck-out'
+
+TRASH = '.trash'
+
+BUCK_OUT_TRASH = os.path.join(BUCK_OUT, TRASH)
+
+BUCK_OUT_GEN = os.path.join(BUCK_OUT, 'gen')
+
 
 # list of possible analyzers
 ANALYZER_INFER = 'infer'
@@ -59,11 +66,8 @@ ANALYZER_ERADICATE = 'eradicate'
 ANALYZER_CHECKERS = 'checkers'
 ANALYZER_CAPTURE = 'capture'
 ANALYZER_COMPILE = 'compile'
-ANALYZER_TRACING = 'tracing'
 ANALYZER_CRASHCONTEXT = 'crashcontext'
 ANALYZER_LINTERS = 'linters'
-ANALYZER_QUANDARY = 'quandary'
-ANALYZER_THREADSAFETY = 'threadsafety'
 
 ANALYZERS = [
     ANALYZER_CAPTURE,
@@ -73,7 +77,4 @@ ANALYZERS = [
     ANALYZER_ERADICATE,
     ANALYZER_INFER,
     ANALYZER_LINTERS,
-    ANALYZER_TRACING,
-    ANALYZER_QUANDARY,
-    ANALYZER_THREADSAFETY,
 ]

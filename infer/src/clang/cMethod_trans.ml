@@ -101,6 +101,13 @@ let is_cpp_virtual function_method_decl_info =
   | Cpp_Meth_decl_info (_, mdi, _, _) -> mdi.Clang_ast_t.xmdi_is_virtual
   | _ -> false
 
+let is_cpp_nothrow function_method_decl_info =
+  match function_method_decl_info with
+  | Func_decl_info (fdi, _)
+  | Cpp_Meth_decl_info (fdi, _, _, _) ->
+      fdi.Clang_ast_t.fdi_is_no_throw
+  | _ -> false
+
 (** Returns parameters of a function/method. They will have following order:
     1. self/this parameter (optional, only for methods)
     2. normal parameters
@@ -139,9 +146,10 @@ let build_method_signature trans_unit_ctx tenv decl_info procname function_metho
   let attributes = decl_info.Clang_ast_t.di_attributes in
   let lang = get_language trans_unit_ctx function_method_decl_info in
   let is_cpp_virtual = is_cpp_virtual function_method_decl_info in
+  let is_cpp_nothrow = is_cpp_nothrow function_method_decl_info in
   CMethod_signature.make_ms
-    procname parameters tp attributes source_range is_instance_method ~is_cpp_virtual:is_cpp_virtual
-    lang parent_pointer pointer_to_property_opt return_param_type_opt
+    procname parameters tp attributes source_range is_instance_method ~is_cpp_virtual
+    ~is_cpp_nothrow lang parent_pointer pointer_to_property_opt return_param_type_opt
 
 let get_init_list_instrs method_decl_info =
   let create_custom_instr construct_instr = `CXXConstructorInit construct_instr in
@@ -386,6 +394,7 @@ let create_local_procdesc ?(set_objc_accessor_attr=false) trans_unit_ctx cfg ten
   let is_cpp_inst_method =
     CMethod_signature.ms_is_instance ms &&
     CFrontend_config.equal_clang_lang (CMethod_signature.ms_get_lang ms) CFrontend_config.CPP in
+  let is_cpp_nothrow = CMethod_signature.ms_is_cpp_nothrow ms in
   let create_new_procdesc () =
     let formals = get_formal_parameters tenv ms in
     let captured_mangled = List.map ~f:(fun (var, t) -> (Pvar.get_name var), t) captured in
@@ -395,8 +404,8 @@ let create_local_procdesc ?(set_objc_accessor_attr=false) trans_unit_ctx cfg ten
         ~shift:(List.length captured_mangled)
         (CMethod_signature.ms_get_args ms) in
     let source_range = CMethod_signature.ms_get_loc ms in
-    Logging.out_debug "\nCreating a new procdesc for function: '%s'\n@." pname;
-    Logging.out_debug "\nms = %s\n@." (CMethod_signature.ms_to_string ms);
+    L.(debug Capture Verbose) "@\nCreating a new procdesc for function: '%s'@\n@." pname;
+    L.(debug Capture Verbose) "@\nms = %s@\n@." (CMethod_signature.ms_to_string ms);
     let loc_start = CLocation.get_sil_location_from_range trans_unit_ctx source_range true in
     let loc_exit = CLocation.get_sil_location_from_range trans_unit_ctx source_range false in
     let ret_type = get_return_type tenv ms in
@@ -413,6 +422,7 @@ let create_local_procdesc ?(set_objc_accessor_attr=false) trans_unit_ctx cfg ten
           is_defined = defined;
           is_objc_instance_method = is_objc_inst_method;
           is_cpp_instance_method = is_cpp_inst_method;
+          is_cpp_noexcept_method = is_cpp_nothrow;
           is_model = Config.models_mode;
           loc = loc_start;
           objc_accessor = objc_property_accessor;
@@ -444,12 +454,10 @@ let create_external_procdesc cfg proc_name is_objc_inst_method type_opt =
          | Some (ret_type, arg_types) ->
              ret_type, List.map ~f:(fun typ -> (Mangled.from_string "x", typ)) arg_types
          | None -> Typ.mk Typ.Tvoid, []) in
-      let loc = Location.dummy in
       let proc_attributes =
         { (ProcAttributes.default proc_name Config.Clang) with
           ProcAttributes.formals;
           is_objc_instance_method = is_objc_inst_method;
-          loc;
           ret_type;
         } in
       ignore (Cfg.create_proc_desc cfg proc_attributes)
@@ -476,7 +484,7 @@ let add_default_method_for_class trans_unit_ctx class_name decl_info =
   let loc = CLocation.get_sil_location_from_range trans_unit_ctx
       decl_info.Clang_ast_t.di_source_range true in
   let proc_name = Typ.Procname.get_default_objc_class_method class_name in
-  let attrs = { (ProcAttributes.default proc_name Config.Clang) with loc = loc; } in
+  let attrs = { (ProcAttributes.default proc_name Config.Clang) with loc; } in
   AttributesTable.store_attributes attrs
 
 let get_procname_from_cpp_lambda context dec =

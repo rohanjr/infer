@@ -33,7 +33,7 @@ let infer_profile = lazy
 \n        </plugins>\
 \n      </build>\
 \n    </profile>\
-  " infer_profile_name (Config.(bin_dir ^/ string_of_analyzer Infer)))
+  " infer_profile_name (Config.bin_dir ^/ CommandDoc.infer_exe_name))
 
 let pom_worklist = ref [CLOpt.init_work_dir]
 
@@ -87,11 +87,11 @@ let add_infer_profile_to_xml dir maven_xml infer_xml =
         Xmlm.output xml_out elt_in;
         (match tag_stack with
          | "id"::"profile"::"profiles"::_ when String.equal data infer_profile_name ->
-             L.do_out "Found infer profile, not adding one@.";
+             L.(debug Capture Quiet) "Found infer profile, not adding one@.";
              found_infer_profile := true
          | "module"::"modules"::_ ->
              let abs_data = dir ^/ data in
-             L.do_out "Adding maven module %s@." abs_data;
+             L.(debug Capture Quiet) "Adding maven module %s@." abs_data;
              pom_worklist := abs_data::!pom_worklist
          | _ -> ()
         );
@@ -132,13 +132,13 @@ let add_profile_to_pom_in_directory dir =
   let infer_pom_path = dir ^/ "pom.xml.infer" in
   add_infer_profile maven_pom_path infer_pom_path;
   Unix.rename ~src:maven_pom_path ~dst:saved_pom_path;
-  Utils.register_epilogue
-    (fun () -> Unix.rename ~src:saved_pom_path ~dst:maven_pom_path)
+  Epilogues.register
+    ~f:(fun () -> Unix.rename ~src:saved_pom_path ~dst:maven_pom_path)
     "restoring Maven's pom.xml to its original state";
   Unix.rename ~src:infer_pom_path ~dst:maven_pom_path;
   if Config.debug_mode || Config.stats_mode then
-    Utils.register_epilogue
-      (fun () -> Unix.rename ~src:maven_pom_path ~dst:infer_pom_path)
+    Epilogues.register
+      ~f:(fun () -> Unix.rename ~src:maven_pom_path ~dst:infer_pom_path)
       "saving infer's pom.xml"
 
 let capture ~prog ~args =
@@ -149,7 +149,7 @@ let capture ~prog ~args =
   done;
   let extra_args = "-P"::infer_profile_name::[] in
   let capture_args = args @ extra_args in
-  L.do_out "Running maven capture:@\n%s %s@." prog
+  L.(debug Capture Quiet) "Running maven capture:@\n%s %s@." prog
     (String.concat ~sep:" " (List.map ~f:(Printf.sprintf "'%s'") capture_args));
   (* let children infer processes know that they are spawned by Maven *)
   Unix.fork_exec ~prog ~args:(prog::capture_args) ~env:Config.env_inside_maven ()
@@ -157,6 +157,6 @@ let capture ~prog ~args =
   |> function
   | Ok () -> ()
   | Error _ as status ->
-      failwithf "*** ERROR: Maven command failed:@\n*** %s@\n*** %s@\n"
+      failwithf "*** Maven command failed:@\n*** %s@\n*** %s@\n"
         (String.concat ~sep:" " (prog::capture_args))
         (Unix.Exit_or_signal.to_string_hum status)

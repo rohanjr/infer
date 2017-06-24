@@ -11,6 +11,8 @@
 
 open! IStd
 
+module L = Logging
+
 type perf_stats = {
   rtime : float;
   utime : float;
@@ -140,23 +142,29 @@ let stats () =
     attributes_table = at
   }
 
-let register_report_at_exit file =
-  Utils.register_epilogue (fun () ->
-      try
-        let json_stats = to_json (stats ()) in
-        try
-          Unix.mkdir_p (Filename.dirname file);
-          let stats_oc = open_out file in
-          let stats_fd = Unix.descr_of_out_channel stats_oc in
-          ignore (Unix.flock stats_fd Unix.Flock_command.lock_exclusive);
+let report_at_exit file () =
+  try
+    let json_stats = to_json (stats ()) in
+    try
+      Unix.mkdir_p (Filename.dirname file);
+      (* the same report may be registered across different infer processes *)
+      Utils.write_file_with_locking file ~f:(fun stats_oc ->
           Yojson.Basic.pretty_to_channel stats_oc json_stats;
-          ignore (Unix.flock stats_fd Unix.Flock_command.unlock);
-          Out_channel.close stats_oc
-        with exc ->
-          Format.eprintf "Info: failed to write stats to %s@\n%s@\n%s@\n%s@."
-            file (Exn.to_string exc) (Yojson.Basic.pretty_to_string json_stats)
-            (Printexc.get_backtrace ())
-      with exc ->
-        Format.eprintf "Info: failed to compute stats for %s@\n%s@\n%s@."
-          file (Exn.to_string exc) (Printexc.get_backtrace ())
-    ) ("stats reporting in " ^ file)
+        );
+    with exc ->
+      L.internal_error "Info: failed to write stats to %s@\n%s@\n%s@\n%s@."
+        file (Exn.to_string exc) (Yojson.Basic.pretty_to_string json_stats)
+        (Printexc.get_backtrace ())
+  with exc ->
+    L.internal_error "Info: failed to compute stats for %s@\n%s@\n%s@."
+      file (Exn.to_string exc) (Printexc.get_backtrace ())
+
+let register_report_at_exit =
+  (* take care of not double-registering the same perf stat report *)
+  let registered_files = String.Table.create ~size:4 () in
+  fun file ->
+    if not (Hashtbl.mem registered_files file) then (
+      String.Table.set registered_files ~key:file ~data:();
+      if not Config.buck_cache_mode then
+        Epilogues.register ~f:(report_at_exit file) ("stats reporting in " ^ file)
+    )

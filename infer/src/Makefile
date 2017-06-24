@@ -22,6 +22,8 @@ ATDGEN_SUFFIXES = _t.ml _t.mli _j.ml _j.mli
 
 #### ocamlbuild options ####
 
+GENERATED_OCAML_SOURCES_GLOB = <*{clang_plugin/*,backend/jsonbug_*,checkers/stacktree_*}>
+
 OCAML_FATAL_WARNINGS = +3+5+6+8+10+11+12+18+19+20+21+23+26+29+27+33+34+35+37+38+39+50+52+57
 
 # options for ocamlbuild
@@ -37,10 +39,11 @@ OCAMLBUILD_OPTIONS = \
   -cflags -strict-formats \
   -cflags -strict-sequence \
   -cflags -w,$(OCAML_FATAL_WARNINGS)-4-9-32-40-41-42-45-48 \
-  -tag-line "<*{clang/clang_ast_*,backend/jsonbug_*,checkers/stacktree_*}>: warn(-27-32-34-35-39)" \
-  -tag-line "<*/{,*/}*.{ml,re}{,i}>: package(ppx_compare)" \
+  -tag-line "$(GENERATED_OCAML_SOURCES_GLOB): warn(-27-32-34-35-39)" \
+  -tag-line "not $(GENERATED_OCAML_SOURCES_GLOB) and <*/{,*/}*.{ml,re}{,i}>: package(ppx_compare)" \
+  -tag-line "not $(GENERATED_OCAML_SOURCES_GLOB) and not <*{base/IList,base/IStd}.*>: open(IStd)" \
   -tag thread \
-  -pkgs ANSITerminal,atdgen,core,extlib,oUnit,str,unix,xmlm,yojson,zip
+  -pkgs ANSITerminal,atdgen,cmdliner,core,extlib,oUnit,parmap,str,unix,xmlm,yojson,zip
 
 ifeq ($(ENABLE_OCAML_BINANNOT),yes)
 OCAMLBUILD_OPTIONS += -cflags -bin-annot
@@ -58,11 +61,11 @@ ifeq ($(TEST),1)
 OCAMLBUILD_OPTIONS += -cflags -warn-error,$(OCAML_FATAL_WARNINGS)
 endif
 
+export OCAMLFIND_IGNORE_DUPS_IN=$(shell $(OCAMLC) -where)/compiler-libs
 
 #### Backend declarations ####
 
 INFER_MAIN = backend/infer
-INFERANALYZE_MAIN = backend/InferAnalyzeExe
 
 #### Checkers declarations ####
 
@@ -76,7 +79,11 @@ INFERPRINT_ATDGEN_STUB_BASE = backend/jsonbug
 INFERPRINT_ATDGEN_STUB_ATD = $(INFERPRINT_ATDGEN_STUB_BASE).atd
 INFERPRINT_ATDGEN_STUBS = $(addprefix $(INFERPRINT_ATDGEN_STUB_BASE), $(ATDGEN_SUFFIXES))
 
-INFERPRINT_MAIN = backend/InferPrintExe
+#### InferCreateTraceViewLinks declarations ####
+
+FACEBOOK_DIR = facebook
+INFER_CREATE_TRACEVIEW_LINKS_MODULE = InferCreateTraceViewLinks
+INFER_CREATE_TRACEVIEW_LINKS_MAIN = $(FACEBOOK_DIR)/$(INFER_CREATE_TRACEVIEW_LINKS_MODULE)
 
 ### InferUnit declarations ###
 
@@ -93,7 +100,8 @@ JAVA_SOURCES = java
 #### Clang declarations ####
 
 CLANG_SOURCES = clang
-INFERCLANG_MAIN = $(CLANG_SOURCES)/InferClang
+
+CLANG_PLUGIN_MIRROR = clang_plugin
 
 FCP_CLANG_OCAML_BUILD_DIR = $(FCP_CLANG_OCAML_DIR)/build
 
@@ -101,17 +109,16 @@ CLANG_PLUGIN_BINARIES = $(addprefix $(FCP_CLANG_OCAML_BUILD_DIR), \
                           clang_ast_converter clang_ast_named_decl_printer)
 
 CLANG_AST_BASE_NAME = clang_ast
-CLANG_ATDGEN_STUB_BASE = $(CLANG_SOURCES)/$(CLANG_AST_BASE_NAME)
+CLANG_ATDGEN_STUB_BASE = $(CLANG_PLUGIN_MIRROR)/$(CLANG_AST_BASE_NAME)
 CLANG_ATDGEN_STUB_ATD = $(FCP_CLANG_OCAML_BUILD_DIR)/$(CLANG_AST_BASE_NAME).atd
 CLANG_ATDGEN_SUFFIXES = _t.ml _t.mli _b.ml _b.mli _j.ml _j.mli _v.ml _v.mli
 CLANG_ATDGEN_STUBS = $(addprefix $(CLANG_ATDGEN_STUB_BASE), $(CLANG_ATDGEN_SUFFIXES))
 
 FCP_CLANG_AST_PROJ = $(addprefix $(FCP_CLANG_OCAML_BUILD_DIR)/, \
                        clang_ast_proj.ml clang_ast_proj.mli)
-FCP_CLANG_AST_MAIN = $(addprefix $(FCP_CLANG_OCAML_DIR)/, \
-                       clang_ast_visit.ml clang_ast_main.ml clang_ast_types.ml)
+FCP_CLANG_AST_MAIN = $(addprefix $(FCP_CLANG_OCAML_DIR)/, clang_ast_visit.ml clang_ast_types.ml)
 FCP_FILES_TO_MIRROR = $(FCP_CLANG_AST_PROJ) $(FCP_CLANG_AST_MAIN)
-INFER_CLANG_FCP_MIRRORED_FILES = $(addprefix $(CLANG_SOURCES)/, $(notdir $(FCP_FILES_TO_MIRROR)))
+CLANG_PLUGIN_MIRRORED_FILES = $(addprefix $(CLANG_PLUGIN_MIRROR)/, $(notdir $(FCP_FILES_TO_MIRROR)))
 
 CLANG_BINIOU_DICT = $(ETC_DIR)/clang_ast.dict
 
@@ -131,7 +138,7 @@ EXTRA_DEPS = opensource
 endif
 
 DEPENDENCIES = \
-  IR backend base checkers eradicate harness integration quandary bufferoverrun \
+  absint backend base bufferoverrun checkers eradicate harness integration IR labs quandary unit \
   $(EXTRA_DEPS)
 
 # ocamlbuild command with options common to all build targets
@@ -141,18 +148,13 @@ OCAMLBUILD_BASE = \
 # ocamlbuild with options necessary to build all targets at once, regardless of configure flags
 OCAMLBUILD_ALL = $(OCAMLBUILD_BASE) $(JAVA_OCAMLBUILD_OPTIONS)
 
-# list of ocamlbuild targets common to all build targets -- native version
-INFER_BASE_TARGETS = \
-  $(INFER_MAIN).native \
-  $(INFERANALYZE_MAIN).native \
-  $(INFERPRINT_MAIN).native
-
-INFER_ALL_TARGETS = $(INFER_BASE_TARGETS) \
-  $(INFERCLANG_MAIN).native \
-
 # configure-aware ocamlbuild commands and targets
 OCAMLBUILD_CONFIG = $(OCAMLBUILD_BASE)
-INFER_CONFIG_TARGETS = $(INFER_BASE_TARGETS)
+# list of ocamlbuild targets common to all build targets -- native version
+INFER_CONFIG_TARGETS = $(INFER_MAIN).native
+ifeq ($(IS_FACEBOOK_TREE),yes)
+INFER_CONFIG_TARGETS += $(INFER_CREATE_TRACEVIEW_LINKS_MAIN).native
+endif
 
 ifeq ($(BUILD_JAVA_ANALYZERS),yes)
 OCAMLBUILD_CONFIG += $(JAVA_OCAMLBUILD_OPTIONS)
@@ -161,8 +163,7 @@ else
 DEPENDENCIES += java_stubs
 endif
 ifeq ($(BUILD_C_ANALYZERS),yes)
-INFER_CONFIG_TARGETS += $(INFERCLANG_MAIN).native
-DEPENDENCIES += clang unit/clang
+DEPENDENCIES += clang clang_plugin unit/clang
 else
 DEPENDENCIES += clang_stubs unit/clang_stubs
 endif
@@ -177,11 +178,9 @@ OCAML_BASE_SOURCES = \
   $(STACKTREE_ATDGEN_STUBS) $(INFERPRINT_ATDGEN_STUBS)
 OCAML_CONFIG_SOURCES = $(OCAML_BASE_SOURCES)
 ifeq ($(BUILD_C_ANALYZERS),yes)
-OCAML_CONFIG_SOURCES += $(CLANG_ATDGEN_STUBS) $(INFER_CLANG_FCP_MIRRORED_FILES)
+OCAML_CONFIG_SOURCES += $(CLANG_ATDGEN_STUBS) $(CLANG_PLUGIN_MIRRORED_FILES)
 endif
-OCAML_ALL_SOURCES = $(OCAML_BASE_SOURCES) $(CLANG_ATDGEN_STUBS) $(INFER_CLANG_FCP_MIRRORED_FILES)
-
-export OCAMLFIND_IGNORE_DUPS_IN=$(shell $(OCAMLC) -where)/compiler-libs
+OCAML_ALL_SOURCES = $(OCAML_BASE_SOURCES) $(CLANG_ATDGEN_STUBS) $(CLANG_PLUGIN_MIRRORED_FILES)
 
 .PHONY: all
 all: infer
@@ -193,22 +192,25 @@ $(INFER_BUILD_DIR)/$(INFER_MAIN).native: base/Version.ml $(OCAML_CONFIG_SOURCES)
 	$(MKDIR_P) $(BASE_BUILD_DIR)
 	$(OCAMLBUILD_CONFIG) -build-dir $(INFER_BUILD_DIR) \
 	  $(INFER_CONFIG_TARGETS)
-# let make know that the target is up-to-date even if ocamlbuild cached it
+#	let make know that the target is up-to-date even if ocamlbuild cached it
 	$(QUIET)touch $@
 
-$(BIN_DIR): Makefile
-	$(MKDIR_P) $@
+INFER_BIN_ALIASES = $(foreach alias,$(INFER_COMMANDS),$(BIN_DIR)/$(alias))
+
+$(INFER_BIN_ALIASES): Makefile
+#	make sure the bin directory exists
+	$(QUIET)$(MKDIR_P) $(@D)
+	$(QUIET)cd $(@D) && $(LN_S) -f infer $(@F)
 	$(QUIET)touch $@
 
-$(INFER_BIN).native: $(INFER_BUILD_DIR)/$(INFER_MAIN).native $(BIN_DIR)
-	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERANALYZE_MAIN).native $(INFERANALYZE_BIN)
-	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERPRINT_MAIN).native $(INFERPRINT_BIN)
-ifeq ($(BUILD_C_ANALYZERS),yes)
-	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERCLANG_MAIN).native $(INFERCLANG_BIN)
-	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERCLANG_MAIN).native $(INFERCLANGXX_BIN)
-endif
+$(INFER_BIN).native: $(INFER_BUILD_DIR)/$(INFER_MAIN).native $(INFER_BIN_ALIASES)
 	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFER_MAIN).native $(INFER_BIN)
 	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFER_MAIN).native $(INFER_BIN).native
+ifeq ($(IS_FACEBOOK_TREE),yes)
+	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFER_CREATE_TRACEVIEW_LINKS_MAIN).native \
+		$(INFER_CREATE_TRACEVIEW_LINKS_BIN)
+endif
+
 
 .PHONY: infer
 infer: $(INFER_BIN).native
@@ -217,22 +219,23 @@ ifeq ($(BUILD_C_ANALYZERS),yes)
 infer: $(CLANG_BINIOU_DICT)
 endif
 
-$(INFER_BUILD_DIR)/$(INFER_MAIN).byte: base/Version.ml $(OCAML_CONFIG_SOURCES)
+$(INFER_BUILD_DIR)/$(INFER_MAIN).byte: base/Version.ml $(OCAML_CONFIG_SOURCES) \
+                                       $(MAKEFILE_LIST)
 	$(MKDIR_P) $(BASE_BUILD_DIR)
 	$(OCAMLBUILD_CONFIG) -build-dir $(INFER_BUILD_DIR) \
-	  $(INFER_CONFIG_TARGETS:.native=.byte) $(INFERUNIT_MAIN).byte
+	  $(INFER_CONFIG_TARGETS:.native=.byte)
 	$(QUIET)touch $@
 
-$(INFER_BIN).byte: $(INFER_BUILD_DIR)/$(INFER_MAIN).byte $(BIN_DIR)
-	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERANALYZE_MAIN).byte $(INFERANALYZE_BIN)
-	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERPRINT_MAIN).byte $(INFERPRINT_BIN)
-	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERUNIT_MAIN).byte $(INFERUNIT_BIN)
-ifeq ($(BUILD_C_ANALYZERS),yes)
-	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERCLANG_MAIN).byte $(INFERCLANG_BIN)
-	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERCLANG_MAIN).byte $(INFERCLANGXX_BIN)
-endif
+$(INFER_BIN).byte: $(INFER_BUILD_DIR)/$(INFER_MAIN).byte $(INFER_BIN_ALIASES)
 	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFER_MAIN).byte $(INFER_BIN)
 	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFER_MAIN).byte $(INFER_BIN).byte
+ifeq ($(TEST),1)
+	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFERUNIT_MAIN).byte $(INFERUNIT_BIN)
+endif
+ifeq ($(IS_FACEBOOK_TREE),yes)
+	$(INSTALL_PROGRAM) $(INFER_BUILD_DIR)/$(INFER_CREATE_TRACEVIEW_LINKS_MAIN).byte \
+		$(INFER_CREATE_TRACEVIEW_LINKS_BIN)
+endif
 
 .PHONY: byte
 byte: $(INFER_BIN).byte
@@ -269,7 +272,10 @@ rei:
 %.rei : %.mli
 	$(SCRIPT_DIR)/refmt.sh -parse ml -print re $< > $*.rei
 
-roots:=Infer InferAnalyzeExe InferClang InferPrintExe StatsAggregator
+roots:=Infer StatsAggregator
+ifeq ($(IS_FACEBOOK_TREE),yes)
+roots += $(INFER_CREATE_TRACEVIEW_LINKS_MODULE)
+endif
 clusters:=base clang java IR
 
 ml_src_files:=$(shell find $(DEPENDENCIES) -regex '.*\.ml\(i\)*')
@@ -365,7 +371,7 @@ $(foreach atd_type,b j t v,\
 
 
 define mirror_fcp_file
-$(CLANG_SOURCES)/$(notdir $(1)): $(1)
+$(CLANG_PLUGIN_MIRROR)/$(notdir $(1)): $(1)
 	$(INSTALL_DATA) $$< $$@
 endef
 
@@ -401,7 +407,7 @@ base/Version.ml: base/Version.ml.in $(MAKEFILE_LIST)
 
 .PHONY: clean
 clean:
-	$(REMOVE) $(INFER_ALL_TARGETS)
+	$(REMOVE) $(INFER_TARGET)
 	$(REMOVE) toplevel.mlpack
 	$(REMOVE_DIR) $(BUILD_DIR)
 	$(REMOVE) $(ETC_DIR)/clang_ast.dict
@@ -409,10 +415,15 @@ clean:
 	$(REMOVE) base/Version.ml.tmp.*
 	$(REMOVE) backend/jsonbug_{j,t}.ml{,i}
 	$(REMOVE) checkers/stacktree_{j,t}.ml{,i}
-	$(REMOVE) $(INFER_BIN){,.byte,.native} $(INFERCLANG_BIN) $(INFERCLANGXX_BIN)
-	$(REMOVE) $(INFERANALYZE_BIN) $(INFERPRINT_BIN)
-	$(REMOVE) $(INFERUNIT_BIN) $(CHECKCOPYRIGHT_BIN)
-	$(REMOVE) $(CLANG_ATDGEN_STUBS)
-	$(REMOVE) $(INFER_CLANG_FCP_MIRRORED_FILES)
+#	be a bit more aggressive than needed with what we remove here so that stale binaries that
+#	only existed in previous versions get removed as well
+	$(REMOVE) $(BIN_DIR)/Infer* $(BIN_DIR)/infer-* $(INFER_BIN){,.byte,.native} $(INFER_BIN_ALIASES) \
+	  $(INFERUNIT_BIN) $(CHECKCOPYRIGHT_BIN)
+	$(REMOVE) $(INFER_CREATE_TRACEVIEW_LINKS_BIN)
+	$(REMOVE) $(CLANG_PLUGIN_MIRROR)/*
 	$(REMOVE) mod_dep.dot
 	$(REMOVE) mod_dep.pdf
+
+# print any variable for Makefile debugging
+print-%:
+	$(QUIET)echo '$*=$($*)'

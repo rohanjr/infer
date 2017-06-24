@@ -29,12 +29,11 @@ let modified_targets = ref String.Set.empty
 
 let modified_file file =
   match Utils.read_file file with
-  | Some targets ->
+  | Ok targets ->
       modified_targets := List.fold ~f:String.Set.add ~init:String.Set.empty targets
-  | None ->
+  | Error error ->
+      L.user_error "Failed to read modified targets file '%s': %s@." file error ;
       ()
-
-let debug = 0
 
 type stats =
   {
@@ -105,8 +104,7 @@ let create_multilinks () =
     Replicate the structure of the source directory in the destination,
     with files replaced by links to the source. *)
 let rec slink ~stats ~skiplevels src dst =
-  if debug >=3
-  then L.stderr "slink src:%s dst:%s skiplevels:%d@." src dst skiplevels;
+  L.(debug MergeCapture Verbose) "slink src:%s dst:%s skiplevels:%d@." src dst skiplevels;
   if Sys.is_directory src = `Yes
   then
     begin
@@ -135,9 +133,7 @@ let should_link ~target ~target_results_dir ~stats infer_out_src infer_out_dst =
     let filename = DB.filename_from_string file in
     let time_orig = DB.file_modified_time ~symlink:false filename in
     let time_link = DB.file_modified_time ~symlink:true filename in
-    if debug >= 2 then
-      L.stderr "file:%s time_orig:%f time_link:%f@."
-        file time_orig time_link;
+    L.(debug MergeCapture Verbose) "file:%s time_orig:%f time_link:%f@." file time_orig time_link;
     time_link > time_orig in
   let symlinks_up_to_date captured_file =
     if Sys.is_directory captured_file = `Yes then
@@ -174,10 +170,9 @@ let should_link ~target ~target_results_dir ~stats infer_out_src infer_out_dst =
     was_modified () ||
     not (was_copied ()) in
   if r then stats.targets_merged <- stats.targets_merged + 1;
-  if debug >= 2
-  then L.stderr "lnk:%s:%d %s@." (if r then "T" else "F") !num_captured_files target_results_dir
-  else if debug >= 1 && r
-  then L.stderr "%s@."target_results_dir;
+  L.(debug MergeCapture Verbose) "lnk:%s:%d %s@." (if r then "T" else "F") !num_captured_files
+    target_results_dir;
+  if r then L.(debug MergeCapture Medium) "%s@."target_results_dir;
   r
 
 (** should_link needs to know whether the source file has changed,
@@ -198,14 +193,16 @@ let process_merge_file deps_file =
         then slink ~stats ~skiplevels infer_out_src infer_out_dst
     | _ ->
         () in
-  Option.iter
-    ~f:(fun lines -> List.iter ~f:process_line lines)
-    (Utils.read_file deps_file);
+  (
+    match Utils.read_file deps_file with
+    | Ok lines -> List.iter ~f:process_line lines
+    | Error error -> L.internal_error "Couldn't read deps file '%s': %s" deps_file error
+  );
   create_multilinks ();
-  L.stdout "Captured results merged.@.";
-  L.stdout "Targets merged: %d@." stats.targets_merged;
-  L.stdout "Files linked: %d@." stats.files_linked;
-  L.stdout "Files multilinked: %d@." stats.files_multilinked
+  L.progress "Captured results merged.@.";
+  L.progress "Targets merged: %d@." stats.targets_merged;
+  L.progress "Files linked: %d@." stats.files_linked;
+  L.progress "Files multilinked: %d@." stats.files_multilinked
 
 
 let merge_captured_targets () =

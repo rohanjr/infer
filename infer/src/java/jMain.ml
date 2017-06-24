@@ -20,13 +20,11 @@ let register_perf_stats_report source_file =
   let stats_dir = Filename.concat Config.results_dir Config.frontend_stats_dir_name in
   let abbrev_source_file = DB.source_file_encoding source_file in
   let stats_file = Config.perf_stats_prefix ^ "_" ^ abbrev_source_file ^ ".json" in
-  Utils.create_dir Config.results_dir ;
-  Utils.create_dir stats_dir ;
   PerfStats.register_report_at_exit (Filename.concat stats_dir stats_file)
 
 
 let init_global_state source_file =
-  if not Config.buck_cache_mode then register_perf_stats_report source_file ;
+  register_perf_stats_report source_file ;
   Config.curr_language := Config.Java;
   DB.Results_dir.init source_file;
   Ident.NameGenerator.reset ();
@@ -54,8 +52,7 @@ let store_icfg source_file tenv cg cfg =
 let do_source_file
     linereader classes program tenv
     source_basename package_opt source_file =
-  L.out_debug "\nfilename: %a (%s)@."
-    SourceFile.pp source_file source_basename;
+  L.(debug Capture Medium) "@\nfilename: %a (%s)@." SourceFile.pp source_file source_basename;
   let call_graph, cfg =
     JFrontend.compute_source_icfg
       linereader classes program tenv
@@ -99,13 +96,13 @@ let save_tenv tenv =
   if not Config.models_mode then JTransType.add_models_types tenv;
   (* TODO: this prevents per compilation step incremental analysis at this stage *)
   if DB.file_exists DB.global_tenv_fname then DB.file_remove DB.global_tenv_fname;
-  L.out_debug "writing new tenv %s@." (DB.filename_to_string DB.global_tenv_fname);
+  L.(debug Capture Medium) "writing new tenv %s@." (DB.filename_to_string DB.global_tenv_fname);
   Tenv.store_to_file DB.global_tenv_fname tenv
 
 
 (* The program is loaded and translated *)
 let do_all_files classpath sources classes =
-  L.do_out "Translating %d source files (%d classes)@."
+  L.(debug Capture Quiet) "Translating %d source files (%d classes)@."
     (String.Map.length sources)
     (JBasics.ClassSet.cardinal classes);
   let program = JClasspath.load_program classpath classes in
@@ -130,14 +127,14 @@ let do_all_files classpath sources classes =
         | JClasspath.Duplicate source_files ->
             List.iter
               ~f:(fun (package, source_file) ->
-                 translate_source_file basename (Some package, source_file) source_file)
+                  translate_source_file basename (Some package, source_file) source_file)
               source_files)
     sources;
   if Config.dependency_mode then
     capture_libs linereader program tenv;
   save_tenv tenv;
   JClasspath.cleanup program;
-  L.out_debug "done @."
+  L.(debug Capture Quiet) "done capturing all files@."
 
 (* loads the source files and translates them *)
 let main load_sources_and_classes =

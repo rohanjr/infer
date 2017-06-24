@@ -116,10 +116,9 @@ module Worklist = struct
       wl.visit_map <-
         Procdesc.NodeMap.add min.node (min.visits + 1) wl.visit_map; (* increase the visits *)
       min.node
-    with Not_found -> begin
-        L.out "@\n...Work list is empty! Impossible to remove edge...@\n";
-        assert false
-      end
+    with Not_found ->
+      L.internal_error "@\n...Work list is empty! Impossible to remove edge...@\n";
+      assert false
 end
 (* =============== END of module Worklist =============== *)
 
@@ -162,7 +161,7 @@ let path_set_checkout_todo (wl : Worklist.t) (node: Procdesc.Node.t) : Paths.Pat
     Hashtbl.replace wl.Worklist.path_set_visited node_id new_visited;
     todo
   with Not_found ->
-    L.out "@.@.ERROR: could not find todo for node %a@.@." Procdesc.Node.pp node;
+    L.internal_error "@\n@\nERROR: could not find todo for node %a@\n@." Procdesc.Node.pp node;
     assert false
 
 (* =============== END of the edge_set object =============== *)
@@ -454,7 +453,7 @@ let check_assignement_guard pdesc node =
               if (is_prune_exp e) && not ((node_contains_call node) && (is_frontend_tmp e)) then (
                 let desc = Errdesc.explain_condition_is_assignment l_node in
                 let exn = Exceptions.Condition_is_assignment (desc, __POS__) in
-                Reporting.log_warning pname ~loc:l_node exn
+                Reporting.log_warning_deprecated pname ~loc:l_node exn
               )
               else ()
           | _ ->
@@ -517,7 +516,7 @@ let forward_tabulate tenv pdesc wl =
      | None -> ());
     L.d_strln "SIL INSTR:";
     Procdesc.Node.d_instrs ~sub_instrs: true (State.get_instr ()) curr_node; L.d_ln ();
-    Reporting.log_error pname exn;
+    Reporting.log_error_deprecated pname exn;
     State.mark_instr_fail exn in
 
   let exe_iter f pathset =
@@ -667,7 +666,7 @@ let report_context_leaks pname sigma tenv =
             let err_desc =
               Errdesc.explain_context_leak pname (Typ.mk (Tstruct name)) fld_name leak_path in
             let exn = Exceptions.Context_leak (err_desc, __POS__) in
-            Reporting.log_error pname exn)
+            Reporting.log_error_deprecated pname exn)
       context_exps in
   (* get the set of pointed-to expressions of type T <: Context *)
   let context_exps =
@@ -702,7 +701,7 @@ let remove_locals_formals_and_check tenv pdesc p =
     let dexp_opt, _ = Errdesc.vpath_find tenv p (Exp.Lvar pvar) in
     let desc = Errdesc.explain_stack_variable_address_escape loc pvar dexp_opt in
     let exn = Exceptions.Stack_variable_address_escape (desc, __POS__) in
-    Reporting.log_warning pname exn in
+    Reporting.log_warning_deprecated pname exn in
   List.iter ~f:check_pvar pvars;
   p'
 
@@ -1004,7 +1003,8 @@ let perform_analysis_phase tenv (summary : Specs.summary) (pdesc : Procdesc.t)
         let add pset prop =
           Paths.PathSet.add_renamed_prop prop (Paths.Path.start start_node) pset in
         Propset.fold add Paths.PathSet.empty init_props in
-      L.out "@.#### Start: Footprint Computation for %a ####@." Typ.Procname.pp pname;
+      L.(debug Analysis Medium) "@\n#### Start: Footprint Computation for %a ####@."
+        Typ.Procname.pp pname;
       L.d_increase_indent 1;
       L.d_strln "initial props =";
       Propset.d Prop.prop_emp init_props; L.d_ln (); L.d_ln();
@@ -1017,13 +1017,13 @@ let perform_analysis_phase tenv (summary : Specs.summary) (pdesc : Procdesc.t)
       ignore (path_set_put_todo wl start_node init_edgeset);
       forward_tabulate tenv pdesc wl in
     let get_results (wl : Worklist.t) () =
-      State.process_execution_failures Reporting.log_warning pname;
+      State.process_execution_failures Reporting.log_warning_deprecated pname;
       let results = collect_analysis_result tenv wl pdesc in
-      L.out "#### [FUNCTION %a] ... OK #####@\n" Typ.Procname.pp pname;
-      L.out "#### Finished: Footprint Computation for %a %a ####@."
+      L.(debug Analysis Medium) "#### [FUNCTION %a] ... OK #####@\n" Typ.Procname.pp pname;
+      L.(debug Analysis Medium) "#### Finished: Footprint Computation for %a %a ####@."
         Typ.Procname.pp pname
         (pp_intra_stats wl pdesc) pname;
-      L.out "#### [FUNCTION %a] Footprint Analysis result ####@\n%a@."
+      L.(debug Analysis Medium) "#### [FUNCTION %a] Footprint Analysis result ####@\n%a@."
         Typ.Procname.pp pname
         (Paths.PathSet.pp Pp.text) results;
       let specs = try extract_specs tenv pdesc results with
@@ -1031,7 +1031,7 @@ let perform_analysis_phase tenv (summary : Specs.summary) (pdesc : Procdesc.t)
             let exn =
               Exceptions.Internal_error
                 (Localise.verbatim_desc "Leak_while_collecting_specs_after_footprint") in
-            Reporting.log_error pname exn;
+            Reporting.log_error_deprecated pname exn;
             [] (* retuning no specs *) in
       specs, Specs.FOOTPRINT in
     let wl = path_set_create_worklist pdesc in
@@ -1044,7 +1044,7 @@ let perform_analysis_phase tenv (summary : Specs.summary) (pdesc : Procdesc.t)
         (Specs.get_specs_from_payload summary) in
     let valid_specs = ref [] in
     let go () =
-      L.out "@.#### Start: Re-Execution for %a ####@." Typ.Procname.pp pname;
+      L.(debug Analysis Medium) "@.#### Start: Re-Execution for %a ####@." Typ.Procname.pp pname;
       let filter p =
         let wl = path_set_create_worklist pdesc in
         let speco = execute_filter_prop wl tenv pdesc start_node p in
@@ -1054,7 +1054,7 @@ let perform_analysis_phase tenv (summary : Specs.summary) (pdesc : Procdesc.t)
               valid_specs := !valid_specs @ [spec];
               true in
         let outcome = if is_valid then "pass" else "fail" in
-        L.out "Finished re-execution for precondition %d %a (%s)@."
+        L.(debug Analysis Medium) "Finished re-execution for precondition %d %a (%s)@."
           (Specs.Jprop.to_number p)
           (pp_intra_stats wl pdesc) pname
           outcome;
@@ -1065,8 +1065,8 @@ let perform_analysis_phase tenv (summary : Specs.summary) (pdesc : Procdesc.t)
         ignore (List.map ~f:filter candidate_preconditions) in
     let get_results () =
       let specs = !valid_specs in
-      L.out "#### [FUNCTION %a] ... OK #####@\n" Typ.Procname.pp pname;
-      L.out "#### Finished: Re-Execution for %a ####@." Typ.Procname.pp pname;
+      L.(debug Analysis Medium) "#### [FUNCTION %a] ... OK #####@\n" Typ.Procname.pp pname;
+      L.(debug Analysis Medium) "#### Finished: Re-Execution for %a ####@." Typ.Procname.pp pname;
       let valid_preconditions =
         List.map ~f:(fun spec -> spec.Specs.pre) specs in
       let source = (Procdesc.get_loc pdesc).file in
@@ -1076,14 +1076,16 @@ let perform_analysis_phase tenv (summary : Specs.summary) (pdesc : Procdesc.t)
           [(Typ.Procname.to_filename pname)] in
       if Config.write_dotty then
         Dotty.pp_speclist_dotty_file filename specs;
-      L.out "@.@.================================================";
-      L.out "@. *** CANDIDATE PRECONDITIONS FOR %a: " Typ.Procname.pp pname;
-      L.out "@.================================================@.";
-      L.out "@.%a @.@." (Specs.Jprop.pp_list Pp.text false) candidate_preconditions;
-      L.out "@.@.================================================";
-      L.out "@. *** VALID PRECONDITIONS FOR %a: " Typ.Procname.pp pname;
-      L.out "@.================================================@.";
-      L.out "@.%a @.@." (Specs.Jprop.pp_list Pp.text true) valid_preconditions;
+      L.(debug Analysis Medium) "@\n@\n================================================";
+      L.(debug Analysis Medium) "@\n *** CANDIDATE PRECONDITIONS FOR %a: " Typ.Procname.pp pname;
+      L.(debug Analysis Medium) "@\n================================================@\n";
+      L.(debug Analysis Medium) "@\n%a @\n@\n"
+        (Specs.Jprop.pp_list Pp.text false) candidate_preconditions;
+      L.(debug Analysis Medium) "@\n@\n================================================";
+      L.(debug Analysis Medium) "@\n *** VALID PRECONDITIONS FOR %a: " Typ.Procname.pp pname;
+      L.(debug Analysis Medium) "@\n================================================@\n";
+      L.(debug Analysis Medium) "@\n%a @\n@."
+        (Specs.Jprop.pp_list Pp.text true) valid_preconditions;
       specs, Specs.RE_EXECUTION in
     go, get_results in
 
@@ -1187,7 +1189,7 @@ let report_runtime_exceptions tenv pdesc summary =
         F.asprintf "%a" (Prop.pp_prop Pp.text) (Specs.Jprop.to_prop pre) in
       let exn_desc = Localise.java_unchecked_exn_desc pname runtime_exception pre_str in
       let exn = Exceptions.Java_runtime_exception (runtime_exception, pre_str, exn_desc) in
-      Reporting.log_error pname exn in
+      Reporting.log_error_deprecated pname exn in
   List.iter ~f:report exn_preconditions
 
 
@@ -1200,7 +1202,7 @@ let report_custom_errors tenv summary =
       let loc = summary.Specs.attributes.ProcAttributes.loc in
       let err_desc = Localise.desc_custom_error loc in
       let exn = Exceptions.Custom_error (custom_error, err_desc) in
-      Reporting.log_error pname exn in
+      Reporting.log_error_deprecated pname exn in
   List.iter ~f:report error_preconditions
 
 module SpecMap = Caml.Map.Make (struct
@@ -1229,7 +1231,7 @@ let update_specs tenv prev_summary phase (new_specs : Specs.NormSpec.t list)
               new_specs)
     then begin
       changed:= true;
-      L.out "Specs changed: removing pre of spec@\n%a@."
+      L.(debug Analysis Medium) "Specs changed: removing pre of spec@\n%a@."
         (Specs.pp_spec Pp.text None) old_spec;
       current_specs := SpecMap.remove old_spec.Specs.pre !current_specs end
     else () in
@@ -1243,7 +1245,7 @@ let update_specs tenv prev_summary phase (new_specs : Specs.NormSpec.t list)
         Specs.Visitedset.union old_visited spec.Specs.visited in
       if not (Paths.PathSet.equal old_post new_post) then begin
         changed := true;
-        L.out "Specs changed: added new post@\n%a@."
+        L.(debug Analysis Medium) "Specs changed: added new post@\n%a@."
           (Propset.pp Pp.text (Specs.Jprop.to_prop spec.Specs.pre))
           (Paths.PathSet.to_propset tenv new_post);
         current_specs :=
@@ -1252,7 +1254,7 @@ let update_specs tenv prev_summary phase (new_specs : Specs.NormSpec.t list)
 
     with Not_found ->
       changed := true;
-      L.out "Specs changed: added new pre@\n%a@."
+      L.(debug Analysis Medium) "Specs changed: added new pre@\n%a@."
         (Specs.Jprop.pp_short Pp.text) spec.Specs.pre;
       current_specs :=
         SpecMap.add
@@ -1310,13 +1312,13 @@ let analyze_proc tenv proc_desc : Specs.summary =
     update_summary tenv summary specs phase res in
   if Config.curr_language_is Config.Clang && Config.report_custom_error then
     report_custom_errors tenv updated_summary;
-  if Config.curr_language_is Config.Java && Config.report_runtime_exceptions then
+  if Config.curr_language_is Config.Java && Config.tracing then
     report_runtime_exceptions tenv proc_desc updated_summary;
   updated_summary
 
 (** Perform the transition from [FOOTPRINT] to [RE_EXECUTION] in spec table *)
 let transition_footprint_re_exe tenv proc_name joined_pres =
-  L.out "Transition %a from footprint to re-exe@." Typ.Procname.pp proc_name;
+  L.(debug Analysis Medium) "Transition %a from footprint to re-exe@." Typ.Procname.pp proc_name;
   let summary = Specs.get_summary_unsafe "transition_footprint_re_exe" proc_name in
   let summary' =
     if Config.only_footprint then
@@ -1363,10 +1365,11 @@ let perform_transition proc_desc tenv proc_name =
       with exn when SymOp.exn_not_failure exn ->
         apply_start_node do_after_node;
         Config.allow_leak := allow_leak;
-        L.err "Error in collect_preconditions for %a@." Typ.Procname.pp proc_name;
+        L.(debug Analysis Medium) "Error in collect_preconditions for %a@."
+          Typ.Procname.pp proc_name;
         let err_name, _, ml_loc_opt, _, _, _, _ = Exceptions.recognize_exception exn in
         let err_str = "exception raised " ^ (Localise.to_issue_id err_name) in
-        L.err "Error: %s %a@." err_str L.pp_ml_loc_opt ml_loc_opt;
+        L.(debug Analysis Medium) "Error: %s %a@." err_str L.pp_ml_loc_opt ml_loc_opt;
         [] in
     transition_footprint_re_exe tenv proc_name joined_pres in
   match Specs.get_summary proc_name with
@@ -1394,6 +1397,29 @@ let interprocedural_algorithm_closures ~prepare_proc exe_env : Tasks.closure lis
     fun () -> process_one_proc proc_name in
   List.map ~f:create_closure procs_to_analyze
 
+let analyze_procedure_aux cg_opt tenv proc_desc =
+  let proc_name = Procdesc.get_proc_name proc_desc in
+  if not (Procdesc.did_preanalysis proc_desc)
+  then
+    begin
+      Preanal.do_liveness proc_desc tenv;
+      Preanal.do_abstraction proc_desc;
+      Option.iter cg_opt ~f:(fun cg -> Preanal.do_dynamic_dispatch proc_desc cg tenv);
+    end;
+  let summaryfp =
+    Config.run_in_footprint_mode (analyze_proc tenv) proc_desc in
+  Specs.add_summary proc_name summaryfp;
+  perform_transition proc_desc tenv proc_name;
+  let summaryre =
+    Config.run_in_re_execution_mode (analyze_proc tenv) proc_desc in
+  Specs.add_summary proc_name summaryre;
+  summaryre
+
+let analyze_procedure { Callbacks.summary; proc_desc; tenv } : Specs.summary =
+  let proc_name = Procdesc.get_proc_name proc_desc in
+  Specs.add_summary proc_name summary;
+  ignore (analyze_procedure_aux None tenv proc_desc);
+  Specs.get_summary_unsafe __FILE__ proc_name
 
 (** Create closures to perform the analysis of an exe_env *)
 let do_analysis_closures exe_env : Tasks.closure list =
@@ -1432,23 +1458,8 @@ let do_analysis_closures exe_env : Tasks.closure list =
     let analyze_ondemand _ proc_desc =
       let proc_name = Procdesc.get_proc_name proc_desc in
       let tenv = Exe_env.get_tenv exe_env proc_name in
-      if not (Procdesc.did_preanalysis proc_desc)
-      then
-        begin
-          Preanal.do_liveness proc_desc tenv;
-          Preanal.do_abstraction proc_desc;
-          Preanal.do_dynamic_dispatch proc_desc (Exe_env.get_cg exe_env) tenv
-        end;
-      let summaryfp =
-        Config.run_in_footprint_mode (analyze_proc tenv) proc_desc in
-      Specs.add_summary proc_name summaryfp;
-
-      perform_transition proc_desc tenv proc_name;
-
-      let summaryre =
-        Config.run_in_re_execution_mode (analyze_proc tenv) proc_desc in
-      Specs.add_summary proc_name summaryre;
-      summaryre in
+      let cg = Exe_env.get_cg exe_env in
+      analyze_procedure_aux (Some cg) tenv proc_desc in
     {
       Ondemand.analyze_ondemand;
       get_proc_desc;
@@ -1515,7 +1526,8 @@ let print_stats_cfg proc_shadowed source cfg =
     match Specs.get_summary proc_name with
     | None -> ()
     | Some _ when proc_shadowed proc_desc ->
-        L.out "print_stats: ignoring function %a which is also defined in another file@."
+        L.(debug Analysis Medium)
+          "print_stats: ignoring function %a which is also defined in another file@."
           Typ.Procname.pp proc_name
     | Some summary ->
         let stats = summary.Specs.stats in
@@ -1572,7 +1584,7 @@ let print_stats_cfg proc_shadowed source cfg =
       Out_channel.close outc
     with Sys_error _ -> () in
   List.iter ~f:compute_stats_proc (Cfg.get_defined_procs cfg);
-  L.out "%a" print_file_stats ();
+  L.(debug Analysis Medium) "%a" print_file_stats ();
   save_file_stats ()
 
 (** Print the stats for all the files in the cluster *)

@@ -21,137 +21,144 @@ let always_strong_update = true (* unsound but ok for bug catching *)
 
 module Condition =
 struct
-  type t =
-    { idx : Itv.astate;
-      size : Itv.astate;
-      proc_name : Typ.Procname.t;
-      loc : Location.t;
-      trace : trace;
-      id : string }
+  type trace = Intra of Typ.Procname.t
+             | Inter of Typ.Procname.t * Typ.Procname.t * Location.t
   [@@deriving compare]
-and trace = Intra of Typ.Procname.t
-          | Inter of Typ.Procname.t * Typ.Procname.t * Location.t
-[@@deriving compare]
 
-and astate = t
+  type t = {
+    proc_name : Typ.Procname.t;
+    loc : Location.t;
+    id : string;
+    trace : trace;
+    idx : Itv.astate;
+    size : Itv.astate;
+  }
+  [@@deriving compare]
 
-let set_size_pos : t -> t
-  = fun c ->
-    let size =
-      if Itv.Bound.le (Itv.lb c.size) Itv.Bound.zero
-      then Itv.make Itv.Bound.zero (Itv.ub c.size)
-      else c.size
-    in
-    { c with size }
+  type astate = t
 
-let string_of_location : Location.t -> string
-  = fun loc ->
-    let fname = SourceFile.to_string loc.Location.file in
-    let pos = Location.to_string loc in
-    F.fprintf F.str_formatter "%s:%s" fname pos;
-    F.flush_str_formatter ()
+  let set_size_pos : t -> t
+    = fun c ->
+      if Itv.Bound.lt (Itv.lb c.size) Itv.Bound.zero
+      then { c with size = Itv.make Itv.Bound.zero (Itv.ub c.size) }
+      else c
 
-let pp_location : F.formatter -> t -> unit
-  = fun fmt c ->
-    F.fprintf fmt "%s" (string_of_location c.loc)
+  let pp_location : F.formatter -> t -> unit
+    = fun fmt c ->
+      Location.pp_file_pos fmt c.loc
 
-let pp : F.formatter -> t -> unit
-  = fun fmt c ->
-    let c = set_size_pos c in
-    if Config.bo_debug <= 1 then
-      F.fprintf fmt "%a < %a at %a" Itv.pp c.idx Itv.pp c.size pp_location c
-    else
-      match c.trace with
-        Inter (_, pname, loc) ->
-          let pname = Typ.Procname.to_string pname in
-          F.fprintf fmt "%a < %a at %a by call %s() at %s"
-            Itv.pp c.idx Itv.pp c.size pp_location c pname (string_of_location loc)
-      | Intra _ -> F.fprintf fmt "%a < %a at %a" Itv.pp c.idx Itv.pp c.size pp_location c
-
-let get_location : t -> Location.t
-  = fun c -> c.loc
-
-let get_trace : t -> trace
-  = fun c -> c.trace
-
-let get_proc_name : t -> Typ.Procname.t
-  = fun c -> c.proc_name
-
-let make : Typ.Procname.t -> Location.t -> string -> idx:Itv.t -> size:Itv.t -> t
-  = fun proc_name loc id ~idx ~size ->
-    { proc_name; idx; size; loc; id ; trace = Intra proc_name }
-
-let filter1 : t -> bool
-  = fun c ->
-    Itv.eq c.idx Itv.top || Itv.eq c.size Itv.top
-    || (try Itv.Bound.eq (Itv.lb c.idx) Itv.Bound.MInf with _ -> false)
-    || (try Itv.Bound.eq (Itv.lb c.size) Itv.Bound.MInf with _ -> false)
-    || (Itv.eq c.idx Itv.nat && Itv.eq c.size Itv.nat)
-
-let filter2 : t -> bool
-  = fun c ->
-    (not (Itv.is_finite c.idx) || not (Itv.is_finite c.size)) (* basically, alarms involving infinity are filtered *)
-    &&                                                        (* except the following cases:                       *)
-    not ((Itv.Bound.is_not_infty (Itv.lb c.idx) &&            (* idx non-infty lb < 0 *)
-          Itv.Bound.lt (Itv.lb c.idx) Itv.Bound.zero)
-         ||
-         (Itv.Bound.is_not_infty (Itv.lb c.idx) &&            (* idx non-infty lb > size lb *)
-          (Itv.Bound.gt (Itv.lb c.idx) (Itv.lb c.size)))
-         ||
-         (Itv.Bound.is_not_infty (Itv.lb c.idx) &&            (* idx non-infty lb > size ub *)
-          (Itv.Bound.gt (Itv.lb c.idx) (Itv.ub c.size)))
-         ||
-         (Itv.Bound.is_not_infty (Itv.ub c.idx) &&            (* idx non-infty ub > size lb *)
-          (Itv.Bound.gt (Itv.ub c.idx) (Itv.lb c.size)))
-         ||
-         (Itv.Bound.is_not_infty (Itv.ub c.idx) &&            (* idx non-infty ub > size ub *)
-          (Itv.Bound.gt (Itv.ub c.idx) (Itv.ub c.size))))
-
-(* check buffer overrun and return its confidence *)
-let check : t -> string option
-  = fun c ->
-    if Config.bo_debug <= 1 && (Itv.is_symbolic c.idx || Itv.is_symbolic c.size)
-    then None
-    else if filter1 c then Some Localise.BucketLevel.b5
-    else if filter2 c then Some Localise.BucketLevel.b3
-    else
+  let pp : F.formatter -> t -> unit
+    = fun fmt c ->
       let c = set_size_pos c in
-      let not_overrun = Itv.lt_sem c.idx c.size in
-      let not_underrun = Itv.le_sem Itv.zero c.idx in
-      if (Itv.eq not_overrun Itv.one) && (Itv.eq not_underrun Itv.one) then None
-      else Some Localise.BucketLevel.b1
+      if Config.bo_debug <= 1 then
+        F.fprintf fmt "%a < %a at %a" Itv.pp c.idx Itv.pp c.size pp_location c
+      else
+        match c.trace with
+          Inter (_, pname, loc) ->
+            let pname = Typ.Procname.to_string pname in
+            F.fprintf fmt "%a < %a at %a by call %s() at %a"
+              Itv.pp c.idx Itv.pp c.size pp_location c pname Location.pp_file_pos loc
+        | Intra _ -> F.fprintf fmt "%a < %a at %a" Itv.pp c.idx Itv.pp c.size pp_location c
 
-let invalid : t -> bool
-  = fun x -> Itv.invalid x.idx || Itv.invalid x.size
+  let get_location : t -> Location.t
+    = fun c -> c.loc
 
-let to_string : t -> string
-  = fun c ->
-    let c = set_size_pos c in
-    "Offset: " ^ Itv.to_string c.idx ^ " Size: " ^ Itv.to_string c.size
-    ^ " @ " ^ string_of_location c.loc
-    ^ (match c.trace with
-          Inter (_, pname, _) ->
-            " by call "
-            ^ MF.monospaced_to_string (Typ.Procname.to_string pname ^ "()") ^ " "
-        | Intra _ -> "")
+  let get_trace : t -> trace
+    = fun c -> c.trace
 
-let subst : t -> Itv.Bound.t Itv.SubstMap.t -> Typ.Procname.t -> Typ.Procname.t -> Location.t -> t
-  = fun c subst_map caller_pname callee_pname loc ->
-    if Itv.is_symbolic c.idx || Itv.is_symbolic c.size then
-      { c with idx = Itv.subst c.idx subst_map;
-               size = Itv.subst c.size subst_map;
-               trace = Inter (caller_pname, callee_pname, loc) }
-    else c
+  let get_proc_name : t -> Typ.Procname.t
+    = fun c -> c.proc_name
+
+  let make : Typ.Procname.t -> Location.t -> string -> idx:Itv.t -> size:Itv.t -> t
+    = fun proc_name loc id ~idx ~size ->
+      { proc_name; idx; size; loc; id ; trace = Intra proc_name }
+
+  let filter1 : t -> bool
+    = fun c ->
+      Itv.eq c.idx Itv.top || Itv.eq c.size Itv.top
+      || Itv.Bound.eq (Itv.lb c.idx) Itv.Bound.MInf
+      || Itv.Bound.eq (Itv.lb c.size) Itv.Bound.MInf
+      || (Itv.eq c.idx Itv.nat && Itv.eq c.size Itv.nat)
+
+  let filter2 : t -> bool
+    = fun c ->
+      (* basically, alarms involving infinity are filtered *)
+      (not (Itv.is_finite c.idx) || not (Itv.is_finite c.size))
+      &&                                                        (* except the following cases *)
+      not ((Itv.Bound.is_not_infty (Itv.lb c.idx) &&            (* idx non-infty lb < 0 *)
+            Itv.Bound.lt (Itv.lb c.idx) Itv.Bound.zero)
+           ||
+           (Itv.Bound.is_not_infty (Itv.lb c.idx) &&            (* idx non-infty lb > size lb *)
+            (Itv.Bound.gt (Itv.lb c.idx) (Itv.lb c.size)))
+           ||
+           (Itv.Bound.is_not_infty (Itv.lb c.idx) &&            (* idx non-infty lb > size ub *)
+            (Itv.Bound.gt (Itv.lb c.idx) (Itv.ub c.size)))
+           ||
+           (Itv.Bound.is_not_infty (Itv.ub c.idx) &&            (* idx non-infty ub > size lb *)
+            (Itv.Bound.gt (Itv.ub c.idx) (Itv.lb c.size)))
+           ||
+           (Itv.Bound.is_not_infty (Itv.ub c.idx) &&            (* idx non-infty ub > size ub *)
+            (Itv.Bound.gt (Itv.ub c.idx) (Itv.ub c.size))))
+
+  (* check buffer overrun and return its confidence *)
+  let check : t -> string option
+    = fun c ->
+      (* idx = [il, iu], size = [sl, su], we want to check that 0 <= idx < size *)
+      let c' = set_size_pos c in (* if sl < 0, use sl' = 0 *)
+      let not_overrun = Itv.lt_sem c'.idx c'.size in
+      let not_underrun = Itv.le_sem Itv.zero c'.idx in
+      (* il >= 0 and iu < sl, definitely not an error *)
+      if Itv.eq not_overrun Itv.one && Itv.eq not_underrun Itv.one then
+        None
+        (* iu < 0 or il >= su, definitely an error *)
+      else if Itv.eq not_overrun Itv.zero || Itv.eq not_underrun Itv.zero then
+        Some Localise.BucketLevel.b1
+        (* su <= iu < +oo, most probably an error *)
+      else if Itv.Bound.is_not_infty (Itv.ub c.idx)
+           && Itv.Bound.le (Itv.ub c.size) (Itv.ub c.idx) then
+        Some Localise.BucketLevel.b2
+        (* symbolic il >= sl, probably an error *)
+      else if Itv.Bound.is_symbolic (Itv.lb c.idx)
+           && Itv.Bound.le (Itv.lb c'.size) (Itv.lb c.idx) then
+        Some Localise.BucketLevel.b3
+        (* other symbolic bounds are probably too noisy *)
+      else if Config.bo_debug <= 3 && (Itv.is_symbolic c.idx || Itv.is_symbolic c.size) then
+        None
+      else if filter1 c then
+        Some Localise.BucketLevel.b5
+      else if filter2 c then
+        Some Localise.BucketLevel.b3
+      else
+        Some Localise.BucketLevel.b2
+
+  let invalid : t -> bool
+    = fun x -> Itv.invalid x.idx || Itv.invalid x.size
+
+  let to_string : t -> string
+    = fun c ->
+      let c = set_size_pos c in
+      "Offset: " ^ Itv.to_string c.idx ^ " Size: " ^ Itv.to_string c.size
+      ^ (match c.trace with
+          | Inter (_, pname, _) ->
+              let loc = pp_location F.str_formatter c; F.flush_str_formatter () in
+              " @ " ^ loc ^ " by call "
+              ^ MF.monospaced_to_string (Typ.Procname.to_string pname ^ "()") ^ " "
+          | Intra _ -> "")
+
+  let subst : t -> Itv.Bound.t Itv.SubstMap.t -> Typ.Procname.t -> Typ.Procname.t -> Location.t -> t
+    = fun c subst_map caller_pname callee_pname loc ->
+      if Itv.is_symbolic c.idx || Itv.is_symbolic c.size then
+        { c with idx = Itv.subst c.idx subst_map;
+                 size = Itv.subst c.size subst_map;
+                 trace = Inter (caller_pname, callee_pname, loc) }
+      else c
 end
 
 module ConditionSet =
 struct
-  module PPSet = PrettyPrintable.MakePPSet (Condition)
-  include AbstractDomain.FiniteSet (PPSet)
+  include AbstractDomain.FiniteSet (Condition)
 
-  module Map = Caml.Map.Make (struct
-      type t = Location.t [@@deriving compare]
-    end)
+  module Map = Caml.Map.Make (Location)
 
   let add_bo_safety
     : Typ.Procname.t -> Location.t -> string -> idx:Itv.t -> size:Itv.t -> t -> t
@@ -251,17 +258,12 @@ struct
   let get_all_locs : t -> PowLoc.t
     = fun x -> PowLoc.join x.powloc (get_array_locs x)
 
-  let top_itv : t
-    = { bot with itv = Itv.top }
+  let of_itv itv = { bot with itv }
 
-  let pos_itv : t
-    = { bot with itv = Itv.pos }
+  let of_int n = of_itv (Itv.of_int n)
 
-  let nat_itv : t
-    = { bot with itv = Itv.nat }
-
-  let of_int : int -> t
-    = fun n -> { bot with itv = Itv.of_int n }
+  let of_itv : Itv.t -> t
+    = fun itv -> { bot with itv }
 
   let of_pow_loc : PowLoc.t -> t
     = fun x -> { bot with powloc = x }
@@ -269,14 +271,12 @@ struct
   let of_array_blk : ArrayBlk.astate -> t
     = fun a -> { bot with arrayblk = a }
 
-  let zero : t
-    = of_int 0
-
   let modify_itv : Itv.t -> t -> t
     = fun i x -> { x with itv = i }
 
-  let make_sym : Typ.Procname.t -> int -> t
-    = fun pname i -> { bot with itv = Itv.make_sym pname i }
+  let make_sym : ?unsigned:bool -> Typ.Procname.t -> (unit -> int) -> t
+    = fun ?(unsigned=false) pname new_sym_num ->
+      { bot with itv = Itv.make_sym ~unsigned pname new_sym_num }
 
   let unknown_bit : t -> t
     = fun x -> { x with itv = Itv.top }
@@ -372,20 +372,19 @@ struct
 
   let plus_pi : t -> t -> t
     = fun x y ->
-      { bot with arrayblk = ArrayBlk.plus_offset x.arrayblk y.itv }
+      { bot with powloc = x.powloc; arrayblk = ArrayBlk.plus_offset x.arrayblk y.itv }
 
   let minus_pi : t -> t -> t
     = fun x y ->
-      { bot with arrayblk = ArrayBlk.minus_offset x.arrayblk y.itv }
+      { bot with powloc = x.powloc; arrayblk = ArrayBlk.minus_offset x.arrayblk y.itv }
 
   let minus_pp : t -> t -> t
     = fun x y ->
-      { bot with itv = ArrayBlk.diff x.arrayblk y.arrayblk }
-
-  let subst : t -> Itv.Bound.t Itv.SubstMap.t -> t
-    = fun x subst_map ->
-      { x with itv = Itv.subst x.itv subst_map;
-               arrayblk = ArrayBlk.subst x.arrayblk subst_map }
+      (* when we cannot precisely follow the physical memory model, return top *)
+      if (not (PowLoc.is_bot x.powloc) && ArrayBlk.is_bot x.arrayblk) ||
+         (not (PowLoc.is_bot y.powloc) && ArrayBlk.is_bot y.arrayblk)
+      then { bot with itv = Itv.top }
+      else { bot with itv = ArrayBlk.diff x.arrayblk y.arrayblk }
 
   let get_symbols : t -> Itv.Symbol.t list
     = fun x ->
@@ -395,34 +394,27 @@ struct
     = fun x ->
       { x with itv = Itv.normalize x.itv; arrayblk = ArrayBlk.normalize x.arrayblk }
 
+  let subst : t -> Itv.Bound.t Itv.SubstMap.t -> t
+    = fun x subst_map ->
+      { x with itv = Itv.subst x.itv subst_map;
+               arrayblk = ArrayBlk.subst x.arrayblk subst_map }
+      |> normalize  (* normalize bottom *)
+
   let pp_summary : F.formatter -> t -> unit
     = fun fmt x -> F.fprintf fmt "(%a, %a)" Itv.pp x.itv ArrayBlk.pp x.arrayblk
+
+  module Itv =
+  struct
+    let nat = of_itv Itv.nat
+    let m1_255 = of_itv Itv.m1_255
+    let pos = of_itv Itv.pos
+    let top = of_itv Itv.top
+  end
 end
 
 module Stack =
 struct
-  module PPMap =
-  struct
-    include PrettyPrintable.MakePPMap (Loc)
-
-    let pp_collection
-      : pp_item:(F.formatter -> 'a -> unit) -> F.formatter -> 'a list -> unit
-      = fun ~pp_item fmt c ->
-        let pp_sep fmt () = F.fprintf fmt ",@," in
-        F.pp_print_list ~pp_sep pp_item fmt c
-
-    let pp
-      : pp_value:(F.formatter -> 'a -> unit) -> F.formatter -> 'a t -> unit
-      = fun ~pp_value fmt m ->
-        let pp_item fmt (k, v) =
-          F.fprintf fmt "%a -> %a" Loc.pp k pp_value v
-        in
-        F.fprintf fmt "@[<v 2>{ ";
-        pp_collection ~pp_item fmt (bindings m);
-        F.fprintf fmt " }@]"
-  end
-
-  include AbstractDomain.Map (PPMap) (Val)
+  include AbstractDomain.Map (Loc) (Val)
 
   let bot = empty
 
@@ -475,14 +467,14 @@ struct
         F.fprintf fmt " }@]"
   end
 
-  include AbstractDomain.Map (PPMap) (Val)
+  include AbstractDomain.Map (Loc) (Val)
 
   let bot = empty
 
   let find : Loc.t -> astate -> Val.t
     = fun l m ->
       try find l m with
-      | Not_found -> Val.bot
+      | Not_found -> Val.Itv.top
 
   let find_set : PowLoc.t -> astate -> Val.t
     = fun locs mem ->
@@ -629,6 +621,10 @@ struct
   let find_heap_set : PowLoc.t -> t -> Val.t
     = fun k m -> Heap.find_set k m.heap
 
+  let find_set : PowLoc.t -> t -> Val.t
+    = fun k m ->
+      Val.join (find_stack_set k m) (find_heap_set k m)
+
   let find_alias : Ident.t -> t -> Pvar.t option
     = fun k m -> Alias.find k m.alias
 
@@ -673,8 +669,7 @@ struct
       then strong_update_heap ploc v s
       else
         let () =
-          if Config.bo_debug >= 3 then
-            L.err "Weak update for %a <- %a@." PowLoc.pp ploc Val.pp v
+          L.(debug BufferOverrun Verbose) "Weak update for %a <- %a@." PowLoc.pp ploc Val.pp v
         in
         weak_update_heap ploc v s
 end
@@ -719,6 +714,10 @@ module Mem = struct
   let find_heap_set : PowLoc.t -> t -> Val.t
     = fun k ->
       f_lift_default Val.bot (MemReach.find_heap_set k)
+
+  let find_set : PowLoc.t -> t -> Val.t
+    = fun k ->
+      f_lift_default Val.bot (MemReach.find_set k)
 
   let find_alias : Ident.t -> t -> Pvar.t option
     = fun k ->
@@ -809,6 +808,6 @@ struct
 
   let pp : F.formatter -> t -> unit
     = fun fmt (entry_mem, exit_mem, condition_set) ->
-      F.fprintf fmt "%a@,%a@,%a@"
+      F.fprintf fmt "%a@,%a@,%a@,"
         Mem.pp entry_mem Mem.pp exit_mem ConditionSet.pp condition_set
 end
