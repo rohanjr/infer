@@ -58,26 +58,23 @@ let get_op_mode (args: string array) : op_mode =
   let default_op_mode = Compile (None, default_output_mode) in
   Array.fold_left process_arg default_op_mode args'
 
-let string_of_pos pos = sprintf "%s:%d:%d" pos.pos_fname pos.pos_lnum (pos.pos_cnum - pos.pos_bol + 1)
-
 let () = try
     match get_op_mode Sys.argv with
     | Info Help -> fprintf stdout 
                      "Name: Group15 GoLite -> C Compiler\nSynopsis: ./main.native [option]... [file]\nDescription: Compile GoLite code into C11.\n-dumpsymtab : Dump the symbol table while compiling.\n-pptype : Pretty print with types.\n-nopretty : Suppress the creation of a pretty printed file.\n-nocompile : Suppress the compilation (for debug).\n--help, -h : Help.\n--version, -v : Compiler version.\n" 
-    | Info Version -> fprintf stdout "Group15 GoLite v1 -> C11 Compiler v1"
+    | Info Version -> fprintf stdout "Group15 GoLite v1 -> C11 Compiler v1\n"
     | Compile (None, _) -> failwith "No input file to compile"
-    | Compile (Some fname, out_mode) ->
-        let _ = Check.SymTbl.filename := fname in
-        let _ = if out_mode.symtbl_dump then Check.SymTbl.clear_file () in 
+    | Compile (Some fname, out_mode) -> begin
+        Check.SymTbl.filename := fname;
+        if out_mode.symtbl_dump then Check.SymTbl.clear_file ();
         let lexbuf = Lexing.from_channel (open_in fname) in
-        let _ = lexbuf.lex_curr_p <- {lexbuf.lex_curr_p with pos_fname = fname} in
+        lexbuf.lex_curr_p <- {lexbuf.lex_curr_p with pos_fname = fname};
         let p = Parser.prog Lexer.token lexbuf in 
         let weeded_one = Weeder.ForSwitchWeeding.weed p in
-        let _ = if out_mode.pp_mode = PP_no_types then
-            let oc = open_out (String.sub fname 0 (String.rindex fname '.') ^ ".pretty.go") in
-            fprintf oc "%s" (Pretty.pretty weeded_one)
-        in
-        let _ = Check.check_prog weeded_one in      
+        (if out_mode.pp_mode = PP_no_types then
+          let oc = open_out (String.sub fname 0 (String.rindex fname '.') ^ ".pretty.go") in
+          fprintf oc "%s" (Pretty.pretty weeded_one));
+        Check.check_prog weeded_one;
         let weeded_two = Weeder.ReturnWeeding.weed weeded_one; weeded_one in
         (* Pretty Printing the file after type checking, given flag *)
         (if out_mode.pp_mode = PP_with_types then
@@ -86,11 +83,14 @@ let () = try
         (if out_mode.c_gen then
            let oc' = open_out (String.sub fname 0 (String.rindex fname '.') ^ ".c") in
            fprintf oc' "%s" (Codegen.gen_prog weeded_two));
-        flush stdout;
+        flush stdout
+      end
   with
   | Lexer.LexerError msg -> fprintf stderr "Lexer error: %s\n" msg
   | Parser.Error -> fprintf stderr "Syntax error.\n"
-  | E.ParsingError (s, p) -> fprintf stderr "%s\n" (string_of_pos p ^ ": error: " ^ s)
+  | E.ParsingError (s, p) ->
+      let string_of_pos pos = sprintf "%s:%d:%d" pos.pos_fname pos.pos_lnum (pos.pos_cnum - pos.pos_bol + 1) in
+      fprintf stderr "%s\n" (string_of_pos p ^ ": error: " ^ s)
   | E.Error s -> fprintf stderr "Error: %s\n" s
   | Weeder.WeedError s -> fprintf stderr "error: %s\n" s
   | Check.TypeError s -> fprintf stderr "Type error: %s\n" s
