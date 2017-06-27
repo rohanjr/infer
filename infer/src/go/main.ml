@@ -14,8 +14,46 @@ open Lexing
 open Pretty
 module E = Error
 
-let pptype = ref false
+type pretty_print_mode = No_pp | PP_no_types | PP_with_types
+
+type output_mode = {
+  pp_mode : pretty_print_mode;
+  symtbl_dump : bool;
+  c_gen : bool;
+}
+
+let default_output_mode = {
+  pp_mode = PP_no_types;
+  symtbl_dump = false;
+  c_gen = true;
+}
+
+type info_mode = Help | Version
+
+type op_mode = Info of info_mode | Compile of string option * output_mode
+
+let process_arg (mode : op_mode) (arg : string) : op_mode =
+  if arg.[0] = '-' then
+    match mode, arg with
+    | _, "-h" | _, "--help" -> Info Help
+    | _, "-v" | _, "--version" -> Info Version
+    | Compile (fname, out_mode), "-nopretty" ->
+        Compile (fname, {out_mode with pp_mode = No_pp})
+    | Compile (fname, out_mode), "-pptype" ->
+        Compile (fname, {out_mode with pp_mode = PP_with_types})
+    | Compile (fname, out_mode), "-dumpsymtab" ->
+        Compile (fname, {out_mode with symtbl_dump = false})
+    | Compile (fname, out_mode), "-nocompile" ->
+        Compile (fname, {out_mode with c_gen = false})
+    | _ -> failwith "Invalid combination of flags"
+  else mode
+
+let get_op_mode (args: string array) : op_mode =
+  let default_op_mode = Compile (None, default_output_mode) in
+  Array.fold_left process_arg default_op_mode args
+
 let pretty_print = ref true
+let pptype = ref false
 let compile = ref true
 let help = ref false
 let version = ref false
