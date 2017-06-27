@@ -76,7 +76,6 @@ let () = try
           fprintf oc "%s" (Pretty.pretty weeded_one));
         Check.check_prog weeded_one;
         let weeded_two = Weeder.ReturnWeeding.weed weeded_one; weeded_one in
-        (* Pretty Printing the file after type checking, given flag *)
         (if out_mode.pp_mode = PP_with_types then
            let oc' = open_out (String.sub fname 0 (String.rindex fname '.') ^ ".pptype.go") in
            fprintf oc' "%s" (Pretty.pretty weeded_two));
